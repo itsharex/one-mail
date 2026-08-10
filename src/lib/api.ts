@@ -33,6 +33,7 @@ import type {
   MessageFilterTag,
   MessageListQuery,
   MailboxChangedEvent,
+  NewMailNotification,
   OutboxMessage as SharedOutboxMessage,
   SettingsUpdateInput,
   SyncAllRunResult,
@@ -245,6 +246,13 @@ export function onMailboxChanged(callback: (event: MailboxChangedEvent) => void)
   if (typeof onChanged !== 'function') return () => {}
 
   return onChanged(callback)
+}
+
+export function onNewMail(callback: (notification: NewMailNotification) => void): () => void {
+  const onNotification = window.api?.notifications?.onNewMail
+  if (typeof onNotification !== 'function') return () => {}
+
+  return onNotification(callback)
 }
 
 export async function saveSettings(input: SettingsUpdateInput): Promise<AppSettings> {

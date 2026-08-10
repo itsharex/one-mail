@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use crate::{db, mail_transport, state::AppState};
 
 const MAX_MESSAGES: usize = 200;
+const IMAP_SUMMARY_QUERY: &str = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])";
 
 pub async fn sync_all(state: &AppState, mode: Option<&str>) -> Result<Value, String> {
     let accounts = {
@@ -116,14 +117,14 @@ fn account_sync_skipped(account: &SyncAccountTarget, error: String) -> Value {
 pub async fn sync_account(
     state: &AppState,
     account_id: i64,
-    _mode: Option<&str>,
+    mode: Option<&str>,
 ) -> Result<Value, String> {
     let account = mail_transport::load_account(state, account_id)?;
     set_syncing(state, account_id)?;
 
     let result = sync_account_inner(state, &account).await;
     match result {
-        Ok(value) => {
+        Ok(mut value) => {
             let connection = db::open(state)?;
             connection
                 .execute(
@@ -132,6 +133,16 @@ pub async fn sync_account(
                     [account_id],
                 )
                 .map_err(|error| format!("更新同步状态失败：{error}"))?;
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "accountEmail".to_string(),
+                    Value::String(account.email.clone()),
+                );
+                object.insert(
+                    "mode".to_string(),
+                    mode.map(str::to_string).map_or(Value::Null, Value::String),
+                );
+            }
             Ok(value)
         }
         Err(error) => {
@@ -215,10 +226,24 @@ async fn sync_account_imap(
         .iter()
         .filter_map(|result| result.get("deletedCount").and_then(Value::as_u64))
         .sum::<u64>();
+    let inserted_count = results
+        .iter()
+        .filter_map(|result| result.get("insertedCount").and_then(Value::as_u64))
+        .sum::<u64>();
+    let new_messages = results
+        .iter()
+        .filter_map(|result| result.get("newMessages").and_then(Value::as_array))
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
     Ok(json!({
         "accountId": account.account_id,
         "folders": results,
         "fetchedCount": fetched_count,
+        "scannedCount": fetched_count,
+        "insertedCount": inserted_count,
+        "newMessageCount": new_messages.len(),
+        "newMessages": new_messages,
         "deletedCount": deleted_count,
         "syncPath": "imap",
         "ok": true
@@ -280,6 +305,7 @@ async fn sync_imap_folder(
     }
 
     let mut fetched = Vec::new();
+    let mut missing_header_uids = Vec::new();
     if !uids.is_empty() {
         let uid_set = uids
             .iter()
@@ -287,7 +313,7 @@ async fn sync_imap_folder(
             .collect::<Vec<_>>()
             .join(",");
         let mut stream = session
-            .uid_fetch(uid_set, "UID FLAGS INTERNALDATE RFC822.SIZE RFC822.HEADER")
+            .uid_fetch(uid_set, IMAP_SUMMARY_QUERY)
             .await
             .map_err(|error| format!("读取邮件摘要失败：{error}"))?;
         while let Some(fetch) = stream
@@ -296,14 +322,14 @@ async fn sync_imap_folder(
             .map_err(|error| format!("读取邮件摘要失败：{error}"))?
         {
             let Some(uid) = fetch.uid else { continue };
-            let headers = fetch
-                .header()
-                .map(|value| mailparse::parse_headers(value).map(|(headers, _)| headers))
-                .transpose()
-                .map_err(|error| format!("解析邮件摘要失败：{error}"))?
-                .unwrap_or_default();
-            let from = headers.get_first_value("From");
-            let (from_name, from_email) = parse_from(from.as_deref());
+            let Some(header_bytes) = fetch.header() else {
+                missing_header_uids.push(uid);
+                continue;
+            };
+            let headers = mailparse::parse_headers(header_bytes)
+                .map(|(headers, _)| headers)
+                .map_err(|error| format!("解析邮件摘要失败（UID {uid}）：{error}"))?;
+            let (from_name, from_email) = crate::mail_body::first_header_address(&headers, "From");
             let internal_date = fetch.internal_date().map(|date| date.to_rfc3339());
             fetched.push(FetchedMessage {
                 uid: i64::from(uid),
@@ -325,6 +351,12 @@ async fn sync_imap_folder(
             });
         }
         drop(stream);
+    }
+    if fetched.is_empty() && !uids.is_empty() && !missing_header_uids.is_empty() {
+        return Err(format!(
+            "IMAP 未返回请求的邮件头（{} 封邮件），已停止写入空摘要。",
+            missing_header_uids.len()
+        ));
     }
     let connection = db::open(state)?;
     let mut result = apply_messages(
@@ -505,42 +537,26 @@ pub(crate) fn apply_messages(
     cursor: Option<&str>,
     sync_path: &str,
 ) -> Result<Value, String> {
+    let mut inserted_count = 0;
+    let mut new_messages = Vec::new();
     for message in messages {
-        connection
-            .execute(
-                "INSERT INTO onemail_mail_messages
-                   (account_id,folder_id,uid,rfc822_message_id,in_reply_to,references_header,subject,
-                    from_name,from_email,received_at,internal_date,snippet,size_bytes,is_read,
-                    has_attachments,flags_json,remote_deleted)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,'[]',?16)
-                 ON CONFLICT(account_id,folder_id,uid) DO UPDATE SET
-                   rfc822_message_id=excluded.rfc822_message_id,in_reply_to=excluded.in_reply_to,
-                   references_header=excluded.references_header,subject=excluded.subject,
-                   from_name=excluded.from_name,from_email=excluded.from_email,
-                   received_at=excluded.received_at,internal_date=excluded.internal_date,
-                   snippet=excluded.snippet,size_bytes=excluded.size_bytes,is_read=excluded.is_read,
-                   has_attachments=excluded.has_attachments,remote_deleted=excluded.remote_deleted,
-                   updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
-                params![
-                    account_id,
-                    folder_id,
-                    message.uid,
-                    message.message_id,
-                    message.in_reply_to,
-                    message.references_header,
-                    message.subject,
-                    message.from_name,
-                    message.from_email,
-                    message.received_at,
-                    message.internal_date,
-                    message.snippet,
-                    i64::from(message.size_bytes),
-                    message.is_read,
-                    message.has_attachments,
-                    message.remote_deleted,
-                ],
-            )
-            .map_err(|error| format!("保存邮件摘要失败：{error}"))?;
+        let inserted_message_id = upsert_message(connection, account_id, folder_id, message)?;
+        if inserted_message_id.is_some() && !message.remote_deleted {
+            inserted_count += 1;
+        }
+        if let Some(message_id) = inserted_message_id
+            .filter(|_| !message.remote_deleted && folder_path.eq_ignore_ascii_case("INBOX"))
+        {
+            new_messages.push(json!({
+                "messageId": message_id,
+                "accountId": account_id,
+                "subject": message.subject.clone(),
+                "fromName": message.from_name.clone(),
+                "fromEmail": message.from_email.clone(),
+                "receivedAt": message.received_at.clone(),
+                "snippet": message.snippet.clone()
+            }));
+        }
     }
     connection
         .execute(
@@ -574,10 +590,75 @@ pub(crate) fn apply_messages(
         "accountId": account_id,
         "folder": folder_path,
         "fetchedCount": messages.iter().filter(|message| !message.remote_deleted).count(),
+        "scannedCount": messages.len(),
+        "insertedCount": inserted_count,
+        "newMessageCount": new_messages.len(),
+        "newMessages": new_messages,
         "deletedCount": messages.iter().filter(|message| message.remote_deleted).count(),
         "syncPath": sync_path,
         "ok": true
     }))
+}
+
+fn upsert_message(
+    connection: &Connection,
+    account_id: i64,
+    folder_id: i64,
+    message: &FetchedMessage,
+) -> Result<Option<i64>, String> {
+    let existing_message_id = connection
+        .query_row(
+            "SELECT message_id FROM onemail_mail_messages
+             WHERE account_id=?1 AND folder_id=?2 AND uid=?3",
+            params![account_id, folder_id, message.uid],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("读取邮件摘要失败：{error}"))?;
+    connection
+        .execute(
+            "INSERT INTO onemail_mail_messages
+                   (account_id,folder_id,uid,rfc822_message_id,in_reply_to,references_header,subject,
+                    from_name,from_email,received_at,internal_date,snippet,size_bytes,is_read,
+                    has_attachments,flags_json,remote_deleted)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,'[]',?16)
+                 ON CONFLICT(account_id,folder_id,uid) DO UPDATE SET
+                   rfc822_message_id=COALESCE(NULLIF(TRIM(excluded.rfc822_message_id),''),onemail_mail_messages.rfc822_message_id),
+                   in_reply_to=COALESCE(NULLIF(TRIM(excluded.in_reply_to),''),onemail_mail_messages.in_reply_to),
+                   references_header=COALESCE(NULLIF(TRIM(excluded.references_header),''),onemail_mail_messages.references_header),
+                   subject=COALESCE(NULLIF(TRIM(excluded.subject),''),onemail_mail_messages.subject),
+                   from_name=COALESCE(NULLIF(TRIM(excluded.from_name),''),onemail_mail_messages.from_name),
+                   from_email=COALESCE(NULLIF(TRIM(excluded.from_email),''),onemail_mail_messages.from_email),
+                   received_at=COALESCE(NULLIF(TRIM(excluded.received_at),''),onemail_mail_messages.received_at),
+                   internal_date=COALESCE(NULLIF(TRIM(excluded.internal_date),''),onemail_mail_messages.internal_date),
+                   snippet=COALESCE(NULLIF(TRIM(excluded.snippet),''),onemail_mail_messages.snippet),
+                   size_bytes=CASE WHEN excluded.size_bytes>0 THEN excluded.size_bytes ELSE onemail_mail_messages.size_bytes END,
+                   is_read=excluded.is_read,
+                   has_attachments=excluded.has_attachments,remote_deleted=excluded.remote_deleted,
+                   updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+            params![
+                account_id,
+                folder_id,
+                message.uid,
+                message.message_id,
+                message.in_reply_to,
+                message.references_header,
+                message.subject,
+                message.from_name,
+                message.from_email,
+                message.received_at,
+                message.internal_date,
+                message.snippet,
+                i64::from(message.size_bytes),
+                message.is_read,
+                message.has_attachments,
+                message.remote_deleted,
+            ],
+        )
+        .map_err(|error| format!("保存邮件摘要失败：{error}"))?;
+    Ok(existing_message_id
+        .is_none()
+        .then(|| connection.last_insert_rowid()))
 }
 
 fn ensure_inbox(connection: &Connection, account_id: i64) -> Result<i64, String> {
@@ -609,29 +690,13 @@ fn set_syncing(state: &AppState, account_id: i64) -> Result<(), String> {
         .map_err(|error| format!("更新同步状态失败：{error}"))
 }
 
-fn parse_from(value: Option<&str>) -> (Option<String>, Option<String>) {
-    let Some(value) = value else {
-        return (None, None);
-    };
-    if let Some(start) = value.rfind('<') {
-        if let Some(end) = value[start + 1..].find('>') {
-            let email = value[start + 1..start + 1 + end].trim().to_string();
-            let name = value[..start].trim().trim_matches('"').trim().to_string();
-            return (
-                (!name.is_empty()).then_some(name),
-                (!email.is_empty()).then_some(email),
-            );
-        }
-    }
-    (
-        None,
-        Some(value.trim().to_string()).filter(|email| email.contains('@')),
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{sync_skip_reason, uid_validity_changed, SyncAccountTarget};
+    use super::{
+        fetched_message, sync_skip_reason, uid_validity_changed, upsert_message, SyncAccountTarget,
+        IMAP_SUMMARY_QUERY,
+    };
+    use rusqlite::Connection;
 
     #[test]
     fn only_resets_a_folder_when_known_uid_validity_changes() {
@@ -639,6 +704,14 @@ mod tests {
         assert!(!uid_validity_changed(Some("123"), Some("123")));
         assert!(!uid_validity_changed(None, Some("123")));
         assert!(!uid_validity_changed(Some("123"), None));
+    }
+
+    #[test]
+    fn wraps_multiple_imap_summary_items_in_parentheses() {
+        assert_eq!(
+            IMAP_SUMMARY_QUERY,
+            "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])"
+        );
     }
 
     #[test]
@@ -674,5 +747,107 @@ mod tests {
 
         account.status = "active".to_string();
         assert_eq!(sync_skip_reason(&account), None);
+    }
+
+    #[test]
+    fn empty_sync_metadata_does_not_erase_existing_headers() {
+        let connection = Connection::open_in_memory().expect("open database");
+        connection
+            .execute_batch(
+                "CREATE TABLE onemail_mail_messages (
+                   message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   account_id INTEGER NOT NULL,
+                   folder_id INTEGER NOT NULL,
+                   uid INTEGER NOT NULL,
+                   rfc822_message_id TEXT,
+                   in_reply_to TEXT,
+                   references_header TEXT,
+                   subject TEXT,
+                   from_name TEXT,
+                   from_email TEXT,
+                   received_at TEXT,
+                   internal_date TEXT,
+                   snippet TEXT,
+                   size_bytes INTEGER NOT NULL DEFAULT 0,
+                   is_read INTEGER NOT NULL DEFAULT 0,
+                   has_attachments INTEGER NOT NULL DEFAULT 0,
+                   flags_json TEXT NOT NULL DEFAULT '[]',
+                   remote_deleted INTEGER NOT NULL DEFAULT 0,
+                   updated_at TEXT,
+                   UNIQUE(account_id,folder_id,uid)
+                 );",
+            )
+            .expect("create messages table");
+
+        let original = fetched_message(
+            42,
+            Some("真实主题".to_string()),
+            Some("<message@example.com>".to_string()),
+            Some("真实发件人".to_string()),
+            Some("sender@example.com".to_string()),
+            Some("2026-08-09T00:00:00Z".to_string()),
+            Some("2026-08-09T00:00:01Z".to_string()),
+            None,
+            None,
+            Some("真实摘要".to_string()),
+            128,
+            false,
+            false,
+            false,
+        );
+        let inserted_message_id =
+            upsert_message(&connection, 1, 1, &original).expect("insert original message");
+        assert!(inserted_message_id.is_some());
+
+        let empty_refresh = fetched_message(
+            42,
+            Some("  ".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            true,
+            false,
+            false,
+        );
+        let inserted_message_id =
+            upsert_message(&connection, 1, 1, &empty_refresh).expect("refresh message");
+        assert_eq!(inserted_message_id, None);
+
+        let stored = connection
+            .query_row(
+                "SELECT subject,from_name,from_email,rfc822_message_id,snippet,size_bytes,is_read
+                 FROM onemail_mail_messages WHERE account_id=1 AND folder_id=1 AND uid=42",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .expect("read refreshed message");
+        assert_eq!(
+            stored,
+            (
+                "真实主题".to_string(),
+                "真实发件人".to_string(),
+                "sender@example.com".to_string(),
+                "<message@example.com>".to_string(),
+                "真实摘要".to_string(),
+                128,
+                1,
+            )
+        );
     }
 }

@@ -121,7 +121,25 @@ pub fn messages_list(state: State<'_, AppState>, query: Option<Value>) -> Result
 }
 
 #[tauri::command]
-pub fn messages_get(state: State<'_, AppState>, message_id: i64) -> Result<Option<Value>, String> {
+pub async fn messages_get(
+    state: State<'_, AppState>,
+    message_id: i64,
+) -> Result<Option<Value>, String> {
+    let connection = db::open(&state)?;
+    let detail = get_message_detail(&connection, message_id)?;
+    let should_repair = detail
+        .as_ref()
+        .is_some_and(message_has_cached_body_but_missing_headers);
+    drop(connection);
+
+    if !should_repair
+        || mail_body::repair_message_metadata(&state, message_id)
+            .await
+            .is_err()
+    {
+        return Ok(detail);
+    }
+
     let connection = db::open(&state)?;
     get_message_detail(&connection, message_id)
 }
@@ -356,6 +374,21 @@ fn map_message_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     }))
 }
 
+fn message_has_cached_body_but_missing_headers(message: &Value) -> bool {
+    let has_cached_body = message.get("body").is_some_and(|body| !body.is_null());
+    let has_subject = message
+        .get("subject")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_sender = ["fromName", "fromEmail"].into_iter().any(|key| {
+        message
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+    has_cached_body && !has_subject && !has_sender
+}
+
 pub(crate) fn get_message_detail(
     connection: &Connection,
     message_id: i64,
@@ -489,4 +522,32 @@ fn message_account_id(connection: &Connection, message_id: i64) -> Result<i64, S
             |row| row.get(0),
         )
         .map_err(|_| "邮件不存在。".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message_has_cached_body_but_missing_headers;
+    use serde_json::json;
+
+    #[test]
+    fn only_repairs_missing_headers_when_a_body_is_already_cached() {
+        assert!(message_has_cached_body_but_missing_headers(&json!({
+            "subject": null,
+            "fromName": null,
+            "fromEmail": null,
+            "body": { "bodyText": "cached" }
+        })));
+        assert!(!message_has_cached_body_but_missing_headers(&json!({
+            "subject": null,
+            "fromName": null,
+            "fromEmail": null,
+            "body": null
+        })));
+        assert!(!message_has_cached_body_but_missing_headers(&json!({
+            "subject": "真实主题",
+            "fromName": null,
+            "fromEmail": null,
+            "body": { "bodyText": "cached" }
+        })));
+    }
 }

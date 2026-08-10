@@ -1,4 +1,6 @@
-use mailparse::{parse_mail, DispositionType, ParsedMail};
+use mailparse::{
+    addrparse_header, parse_mail, DispositionType, MailAddr, MailHeader, MailHeaderMap, ParsedMail,
+};
 use regex::Regex;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
@@ -11,9 +13,21 @@ use crate::{
 
 #[derive(Default)]
 struct ParsedMessageBody {
+    headers: ParsedMessageHeaders,
     text: Option<String>,
     html: Option<String>,
     attachments: Vec<ParsedAttachment>,
+}
+
+#[derive(Default)]
+struct ParsedMessageHeaders {
+    subject: Option<String>,
+    message_id: Option<String>,
+    from_name: Option<String>,
+    from_email: Option<String>,
+    received_at: Option<String>,
+    in_reply_to: Option<String>,
+    references_header: Option<String>,
 }
 
 struct ParsedAttachment {
@@ -45,6 +59,20 @@ pub async fn load_message_body(state: &AppState, message_id: i64) -> Result<Valu
         let _ = set_body_status(state, message_id, "error", Some(error));
     }
     result
+}
+
+pub async fn repair_message_metadata(state: &AppState, message_id: i64) -> Result<(), String> {
+    let locator = get_message_locator(state, message_id)?
+        .ok_or_else(|| format!("邮件不存在：{message_id}"))?;
+    let raw_message = mail_transport::fetch_raw_message(
+        state,
+        &locator.account,
+        &locator.folder_path,
+        locator.uid,
+    )
+    .await?;
+    let parsed = parse_message(&raw_message)?;
+    persist_message_body(state, message_id, locator.account.account_id, parsed).map(|_| ())
 }
 
 struct MessageLocator {
@@ -104,18 +132,17 @@ fn set_body_status(
 
 fn parse_message(raw_message: &[u8]) -> Result<ParsedMessageBody, String> {
     let parsed = parse_mail(raw_message).map_err(|error| format!("解析邮件正文失败：{error}"))?;
+    let headers = parse_message_headers(&parsed.headers);
     let mut leaves = Vec::new();
     collect_leaf_parts(&parsed, &mut leaves);
     let text = leaves
         .iter()
-        .find(|part| part.ctype.mimetype.eq_ignore_ascii_case("text/plain"))
-        .and_then(|part| part.get_body().ok())
-        .filter(|value| !value.trim().is_empty());
+        .filter(|part| is_message_body_part(part, "text/plain"))
+        .find_map(|part| decode_text_part(part));
     let html = leaves
         .iter()
-        .find(|part| part.ctype.mimetype.eq_ignore_ascii_case("text/html"))
-        .and_then(|part| part.get_body().ok())
-        .filter(|value| !value.trim().is_empty());
+        .filter(|part| is_message_body_part(part, "text/html"))
+        .find_map(|part| decode_text_part(part));
     let attachments = leaves
         .iter()
         .filter_map(|part| {
@@ -145,10 +172,104 @@ fn parse_message(raw_message: &[u8]) -> Result<ParsedMessageBody, String> {
         .collect();
 
     Ok(ParsedMessageBody {
+        headers,
         text,
         html,
         attachments,
     })
+}
+
+fn parse_message_headers(headers: &[MailHeader<'_>]) -> ParsedMessageHeaders {
+    let (from_name, from_email) = first_header_address(headers, "From");
+
+    ParsedMessageHeaders {
+        subject: non_empty_header(headers, "Subject"),
+        message_id: non_empty_header(headers, "Message-ID"),
+        from_name,
+        from_email,
+        received_at: non_empty_header(headers, "Date"),
+        in_reply_to: non_empty_header(headers, "In-Reply-To"),
+        references_header: non_empty_header(headers, "References"),
+    }
+}
+
+pub(crate) fn first_header_address(
+    headers: &[MailHeader<'_>],
+    header_name: &str,
+) -> (Option<String>, Option<String>) {
+    let Some(header) = headers.get_first_header(header_name) else {
+        return (None, None);
+    };
+    if let Ok(addresses) = addrparse_header(header) {
+        for address in addresses.iter() {
+            let address = match address {
+                MailAddr::Single(address) => Some(address),
+                MailAddr::Group(group) => group.addrs.first(),
+            };
+            if let Some(address) = address {
+                let name = address
+                    .display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string);
+                let email = address.addr.trim().to_string();
+                if !email.is_empty() {
+                    return (name, Some(email));
+                }
+            }
+        }
+    }
+    parse_loose_address(&header.get_value())
+}
+
+fn non_empty_header(headers: &[MailHeader<'_>], name: &str) -> Option<String> {
+    headers
+        .get_first_value(name)
+        .map(|value| value.replace('\0', "").trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_loose_address(value: &str) -> (Option<String>, Option<String>) {
+    let value = value.trim();
+    let (name, email) = if let Some(start) = value.rfind('<') {
+        let Some(end) = value[start + 1..].find('>').map(|end| end + start + 1) else {
+            return (None, None);
+        };
+        (
+            value[..start].trim().trim_matches('"').trim().to_string(),
+            value[start + 1..end].trim().to_string(),
+        )
+    } else {
+        (String::new(), value.to_string())
+    };
+    if !email.contains('@') {
+        return (None, None);
+    }
+    ((!name.is_empty()).then_some(name), Some(email))
+}
+
+fn is_message_body_part(part: &ParsedMail<'_>, mime_type: &str) -> bool {
+    if !part.ctype.mimetype.eq_ignore_ascii_case(mime_type) {
+        return false;
+    }
+    let disposition = part.get_content_disposition();
+    if matches!(disposition.disposition, DispositionType::Attachment) {
+        return false;
+    }
+    !disposition.params.contains_key("filename") && !part.ctype.params.contains_key("name")
+}
+
+fn decode_text_part(part: &ParsedMail<'_>) -> Option<String> {
+    part.get_body()
+        .ok()
+        .or_else(|| {
+            part.get_body_raw()
+                .ok()
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        })
+        .map(|value| value.replace('\0', ""))
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn collect_leaf_parts<'a>(part: &'a ParsedMail<'a>, leaves: &mut Vec<&'a ParsedMail<'a>>) {
@@ -167,8 +288,18 @@ fn persist_message_body(
     account_id: i64,
     parsed: ParsedMessageBody,
 ) -> Result<Value, String> {
-    let body_text = parsed.text.as_deref().map(normalize_body_text);
+    let body_text = parsed
+        .text
+        .as_deref()
+        .map(normalize_body_text)
+        .filter(|value| !value.is_empty());
     let body_html = parsed.html.as_deref().and_then(sanitize_html);
+    let search_text = body_text
+        .as_deref()
+        .map(str::to_string)
+        .or_else(|| body_html.as_deref().map(html_to_text))
+        .unwrap_or_default();
+    let snippet = build_snippet(&search_text);
     let connection = db::open(state)?;
     connection
         .execute(
@@ -221,11 +352,7 @@ fn persist_message_body(
         )
         .map_err(|error| format!("更新正文状态失败：{error}"))?;
 
-    let search_text = body_text
-        .as_deref()
-        .map(str::to_string)
-        .or_else(|| body_html.as_deref().map(html_to_text))
-        .unwrap_or_default();
+    persist_message_headers(&connection, message_id, &parsed.headers, snippet.as_deref())?;
     update_search_index(&connection, message_id, account_id, &search_text)?;
 
     Ok(json!({
@@ -234,6 +361,47 @@ fn persist_message_body(
         "bodyHtmlSanitized": body_html,
         "externalImagesBlocked": true
     }))
+}
+
+fn persist_message_headers(
+    connection: &rusqlite::Connection,
+    message_id: i64,
+    headers: &ParsedMessageHeaders,
+    snippet: Option<&str>,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE onemail_mail_messages SET
+               rfc822_message_id=COALESCE(NULLIF(TRIM(rfc822_message_id),''),?2),
+               in_reply_to=COALESCE(NULLIF(TRIM(in_reply_to),''),?3),
+               references_header=COALESCE(NULLIF(TRIM(references_header),''),?4),
+               subject=COALESCE(NULLIF(TRIM(subject),''),?5),
+               from_name=COALESCE(NULLIF(TRIM(from_name),''),?6),
+               from_email=COALESCE(NULLIF(TRIM(from_email),''),?7),
+               received_at=COALESCE(NULLIF(TRIM(received_at),''),?8),
+               snippet=COALESCE(NULLIF(TRIM(snippet),''),?9),
+               updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE message_id=?1",
+            params![
+                message_id,
+                headers.message_id,
+                headers.in_reply_to,
+                headers.references_header,
+                headers.subject,
+                headers.from_name,
+                headers.from_email,
+                headers.received_at,
+                snippet,
+            ],
+        )
+        .map_err(|error| format!("回填邮件摘要失败：{error}"))?;
+    Ok(())
+}
+
+fn build_snippet(value: &str) -> Option<String> {
+    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let snippet = value.chars().take(240).collect::<String>();
+    (!snippet.is_empty()).then_some(snippet)
 }
 
 fn update_search_index(
@@ -329,4 +497,98 @@ pub(crate) fn html_to_text(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_message, persist_message_headers};
+    use rusqlite::Connection;
+
+    const RAW_MESSAGE: &[u8] = concat!(
+        "Subject: =?UTF-8?B?5rWL6K+V5Li76aKY?=\r\n",
+        "Message-ID: <message@example.com>\r\n",
+        "From: =?UTF-8?B?5rWL6K+V5Y+R5Lu25Lq6?= <sender@example.com>\r\n",
+        "To: Owner <owner@example.com>, second@example.com\r\n",
+        "Date: Sat, 9 Aug 2026 12:00:00 +0000\r\n",
+        "Content-Type: multipart/alternative; boundary=mail-boundary\r\n",
+        "\r\n",
+        "--mail-boundary\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "Content-Transfer-Encoding: base64\r\n",
+        "\r\n",
+        "6L+Z5piv6YKu5Lu25q2j5paH44CC\r\n",
+        "--mail-boundary\r\n",
+        "Content-Type: text/html; charset=utf-8\r\n",
+        "\r\n",
+        "<p>这是邮件正文。</p>\r\n",
+        "--mail-boundary--\r\n"
+    )
+    .as_bytes();
+
+    #[test]
+    fn parses_encoded_headers_addresses_and_multipart_body() {
+        let parsed = parse_message(RAW_MESSAGE).expect("parse message");
+
+        assert_eq!(parsed.headers.subject.as_deref(), Some("测试主题"));
+        assert_eq!(parsed.headers.from_name.as_deref(), Some("测试发件人"));
+        assert_eq!(
+            parsed.headers.from_email.as_deref(),
+            Some("sender@example.com")
+        );
+        assert_eq!(parsed.text.as_deref(), Some("这是邮件正文。"));
+        assert_eq!(parsed.html.as_deref(), Some("<p>这是邮件正文。</p>"));
+    }
+
+    #[test]
+    fn full_message_headers_backfill_missing_metadata_without_overwriting_valid_subject() {
+        let connection = Connection::open_in_memory().expect("open database");
+        connection
+            .execute_batch(
+                "CREATE TABLE onemail_mail_messages (
+                   message_id INTEGER PRIMARY KEY,
+                   rfc822_message_id TEXT,
+                   in_reply_to TEXT,
+                   references_header TEXT,
+                   subject TEXT,
+                   from_name TEXT,
+                   from_email TEXT,
+                   received_at TEXT,
+                   snippet TEXT,
+                   updated_at TEXT
+                 );
+                 INSERT INTO onemail_mail_messages(message_id,subject) VALUES (1,'保留主题');",
+            )
+            .expect("create message tables");
+        let parsed = parse_message(RAW_MESSAGE).expect("parse message");
+
+        persist_message_headers(&connection, 1, &parsed.headers, Some("正文摘要"))
+            .expect("backfill headers");
+
+        let stored = connection
+            .query_row(
+                "SELECT subject,from_name,from_email,rfc822_message_id,snippet
+                 FROM onemail_mail_messages WHERE message_id=1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .expect("read message");
+        assert_eq!(
+            stored,
+            (
+                "保留主题".to_string(),
+                "测试发件人".to_string(),
+                "sender@example.com".to_string(),
+                "<message@example.com>".to_string(),
+                "正文摘要".to_string(),
+            )
+        );
+    }
 }

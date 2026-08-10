@@ -55,6 +55,7 @@ import {
   onAccountCreated,
   onAppUpdateStatus,
   onMailboxChanged,
+  onNewMail,
   openAddAccountWindow,
   openExternalUrl,
   reauthorizeAccount,
@@ -68,6 +69,7 @@ import {
   verifyAndSaveAiSettings
 } from '@renderer/pages/mailbox/api'
 import { normalizeLocale, useI18n } from '@renderer/lib/i18n'
+import { showNewMailSystemNotification } from '@renderer/lib/system-notifications'
 import { ONEMAIL_HOMEPAGE_URL, hasAvailableUpdate } from '@renderer/lib/update-status'
 import type { OutboxMessage } from '@renderer/pages/mailbox/api'
 import { toast } from 'sonner'
@@ -371,6 +373,26 @@ export function MailboxWorkspace(): React.JSX.Element {
       })
     })
   }, [refreshVisibleMailbox, t])
+
+  React.useEffect(() => {
+    return onNewMail((notification) => {
+      const platform = document.documentElement.dataset.platform
+      void showNewMailSystemNotification(
+        notification,
+        {
+          title: t('notification.newMail.title'),
+          countTitle: t('notification.newMail.countTitle', {
+            count: notification.messageCount
+          }),
+          noSubject: t('common.noSubject'),
+          unknownSender: t('common.unknownSender')
+        },
+        platform === 'macos' || platform === 'windows' ? platform : 'linux'
+      ).catch((notificationError) => {
+        console.warn('Failed to show the new-mail system notification.', notificationError)
+      })
+    })
+  }, [t])
 
   React.useEffect(() => {
     let cancelled = false
