@@ -126,8 +126,9 @@ pub async fn messages_get(
     message_id: i64,
 ) -> Result<Option<Value>, String> {
     let connection = db::open(&state)?;
+    let participants_missing = mail_body::participants_need_repair(&connection, message_id)?;
     let detail = get_message_detail(&connection, message_id)?;
-    let should_repair = detail
+    let should_repair = participants_missing || detail
         .as_ref()
         .is_some_and(message_has_cached_body_but_missing_headers);
     drop(connection);
@@ -168,6 +169,12 @@ pub async fn messages_load_body(
         .map_err(database_error)?;
 
     if let Some(body) = body {
+        let participants_missing = mail_body::participants_need_repair(&connection, message_id)?;
+        drop(connection);
+        if participants_missing {
+            let error = mail_body::repair_message_metadata(&state, message_id).await.err();
+            return Ok(json!({ "body": body, "error": error }));
+        }
         return Ok(json!({ "body": body, "error": null }));
     }
 

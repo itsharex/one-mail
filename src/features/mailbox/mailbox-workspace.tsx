@@ -1,21 +1,19 @@
 import * as React from 'react'
-import { useNavigate, useParams } from 'react-router'
+import { queryClient } from '@renderer/lib/query-client'
+import { ConversationWorkspace } from '@renderer/components/conversations/conversation-workspace'
 import { AccountList } from '@renderer/components/account/account-list'
 import { AiAssistant } from '@renderer/components/ai/ai-assistant'
 import { AccountWarningDialog } from '@renderer/components/account/account-warning-dialog'
 import { EditAccountDialog } from '@renderer/components/account/edit-account-dialog'
 import { OutlookImapHelpDialog } from '@renderer/components/account/outlook-imap-help-dialog'
 import { RemoveAccountDialog } from '@renderer/components/account/remove-account-dialog'
-import { DeleteMessageDialog } from '@renderer/components/mail/delete-message-dialog'
 import { MailComposer } from '@renderer/components/mail/mail-composer'
-import { MailList } from '@renderer/components/mail/mail-list'
-import { MailReader } from '@renderer/components/mail/mail-reader'
 import { OutboxPanel } from '@renderer/components/mail/outbox-panel'
 import {
   BackupImportDialog,
   type BackupImportDialogSource
 } from '@renderer/components/backup/backup-import-dialog'
-import type { Account, MailFilterTag, Message } from '@renderer/components/mail/types'
+import type { Account } from '@renderer/components/mail/types'
 import { SettingsDialog } from '@renderer/components/settings/settings-dialog'
 import {
   ResizableHandle,
@@ -48,13 +46,11 @@ import {
   loadAccounts,
   loadAiSettings,
   loadInitialData,
-  loadMessageDetail,
-  loadMessages,
   loadOutboxMessages,
-  MESSAGE_LIST_PAGE_SIZE,
   onAccountCreated,
   onAppUpdateStatus,
   onMailboxChanged,
+  onSyncProgress,
   onNewMail,
   openAddAccountWindow,
   openExternalUrl,
@@ -64,7 +60,6 @@ import {
   saveSettings,
   syncAllAccounts,
   syncAccount,
-  toMessageQuery,
   updateAccount,
   verifyAndSaveAiSettings
 } from '@renderer/pages/mailbox/api'
@@ -82,19 +77,10 @@ import {
   shouldEditCredential,
   shouldShowOutlookImapHelp
 } from './mailbox-utils'
-import { useMailboxMessages } from './use-mailbox-messages'
 import { useMailComposer } from './use-mail-composer'
-import { useMessageActions } from './use-message-actions'
-import { useMessageSelection } from './use-message-selection'
 import { useSyncFeedback } from './use-sync-feedback'
 
 export type DialogKind = 'edit' | 'delete' | 'settings' | null
-
-function normalizeRouteId(value: string | undefined): string | undefined {
-  const text = value?.trim()
-  if (!text) return undefined
-  return decodeURIComponent(text)
-}
 
 function formatImportResultMessage(
   result: BackupImportResult | BackupSyncDownloadResult,
@@ -117,42 +103,14 @@ type SyncAllFailure = {
   error: string
 }
 
-function getSyncAllFailureMessage(result: SyncAllRunResult, accounts: Account[]): string | null {
-  const items = result.accounts
-
-  const failures = items
-    .map((item): SyncAllFailure | null => {
-      const { accountId, error, ok } = item
-      if (typeof accountId !== 'number' || ok !== false) return null
-      return {
-        accountId,
-        error: typeof error === 'string' && error.trim() ? error : '同步失败'
-      }
-    })
-    .filter((item): item is SyncAllFailure => Boolean(item))
-
-  if (failures.length === 0) return null
-
-  const accountNames = new Map(
-    accounts
-      .filter((account) => typeof account.accountId === 'number')
-      .map((account) => [account.accountId, account.name || account.address || account.id])
-  )
-  const examples = failures.slice(0, 3).map((failure) => {
-    const accountName = accountNames.get(failure.accountId) ?? `#${failure.accountId}`
-    return `${accountName}：${failure.error}`
-  })
-  const remainingCount = failures.length - examples.length
-  const remainingText = remainingCount > 0 ? `；另有 ${remainingCount} 个账号失败` : ''
-
-  return `${failures.length} 个账号同步失败：${examples.join('；')}${remainingText}`
+function getSyncAllFailures(result: SyncAllRunResult): SyncAllFailure[] {
+  return result.accounts
+    .filter((item) => typeof item.accountId === 'number' && item.ok === false)
+    .map((item) => ({ accountId: item.accountId, error: item.error?.trim() || '同步失败' }))
 }
 
 export function MailboxWorkspace(): React.JSX.Element {
-  const navigate = useNavigate()
-  const routeParams = useParams<{ accountId?: string; messageId?: string }>()
   const { setLocale, t } = useI18n()
-  const internalRouteRef = React.useRef<string | null>(null)
   const [accounts, setAccounts] = React.useState<Account[]>([])
   const [settings, setSettings] = React.useState<AppSettings | null>(null)
   const [aiSettings, setAiSettings] = React.useState<AiSettings | null>(null)
@@ -160,8 +118,6 @@ export function MailboxWorkspace(): React.JSX.Element {
   const [systemInfo, setSystemInfo] = React.useState<SystemInfo | null>(null)
   const [updateStatus, setUpdateStatus] = React.useState<AppUpdateStatus | null>(null)
   const [selectedAccountId, setSelectedAccountId] = React.useState('all')
-  const [filters, setFilters] = React.useState<MailFilterTag[]>([])
-  const [searchKeyword, setSearchKeyword] = React.useState('')
   const [dialogKind, setDialogKind] = React.useState<DialogKind>(null)
   const [backupImportDialogOpen, setBackupImportDialogOpen] = React.useState(false)
   const [backupImportSource, setBackupImportSource] =
@@ -180,61 +136,10 @@ export function MailboxWorkspace(): React.JSX.Element {
     useSyncFeedback()
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
-  const {
-    messages,
-    selectedMessage,
-    selectedMessageId,
-    messagePage,
-    loadingMessageId,
-    loadingBodyMessageId,
-    downloadingAttachmentIds,
-    markingRead,
-    replaceMessages,
-    clearMessages,
-    removeMessages,
-    refreshMessages,
-    selectMessage,
-    markMessagesRead,
-    markCurrentQueryRead,
-    loadMoreMessages,
-    loadMessageBody,
-    downloadMessageAttachment
-  } = useMailboxMessages({
-    selectedAccountId,
-    filters,
-    searchKeyword,
-    loading,
-    setAccounts,
-    setError
-  })
-  const selectionScopeKey = React.useMemo(
-    () => `${selectedAccountId}:${filters.join(',')}:${searchKeyword}`,
-    [filters, searchKeyword, selectedAccountId]
-  )
-  const {
-    selectedMessageIds,
-    selectedMessages,
-    allVisibleSelected,
-    someVisibleSelected,
-    clearSelection,
-    selectAllVisible,
-    toggleMessageSelection
-  } = useMessageSelection({ messages, resetKey: selectionScopeKey })
-  const {
-    deleteRequest,
-    deletingMessageIds,
-    deleting,
-    requestDeleteMessages,
-    cancelDelete,
-    confirmDelete
-  } = useMessageActions({
-    removeMessages,
-    clearSelection,
-    setError
-  })
-  const mainLayout = ResizablePrimitive.useDefaultLayout({
-    id: 'onemail-main-layout-v3',
-    panelIds: ['accounts', 'messages', 'reader']
+  const [syncFailures, setSyncFailures] = React.useState<SyncAllFailure[]>([])
+  const conversationLayout = ResizablePrimitive.useDefaultLayout({
+    id: 'onemail-conversation-layout-v1',
+    panelIds: ['accounts', 'conversations']
   })
 
   const dialogAccount =
@@ -249,9 +154,6 @@ export function MailboxWorkspace(): React.JSX.Element {
     accounts.find((account) => account.id === selectedAccountId) ??
     accounts[0] ??
     getFallbackAccount()
-  const selectedMessageAccount = selectedMessage
-    ? accounts.find((account) => account.accountId === selectedMessage.accountId)
-    : undefined
   const showNoAccounts = !loading && !hasAccounts
   const {
     composerOpen,
@@ -268,8 +170,6 @@ export function MailboxWorkspace(): React.JSX.Element {
     selectedAccount,
     setError
   })
-  const routeAccountId = normalizeRouteId(routeParams.accountId)
-  const routeMessageId = normalizeRouteId(routeParams.messageId)
 
   const refreshAccounts = React.useCallback(async () => {
     const nextAccounts = await loadAccounts()
@@ -281,33 +181,18 @@ export function MailboxWorkspace(): React.JSX.Element {
     setOutboxMessages(messages)
   }, [])
 
-  const refreshVisibleMailbox = React.useCallback(
-    async (changedAccountId: number): Promise<void> => {
-      const currentAccountId = selectedAccountId
-      const shouldRefreshMessages =
-        currentAccountId === 'all' || currentAccountId === String(changedAccountId)
+  const handleRefreshOutbox = React.useCallback(() => {
+    void refreshOutbox().catch((refreshError) => {
+      setError(getErrorMessage(refreshError, t('mailbox.loadOutboxError')))
+    })
+  }, [refreshOutbox, t])
 
-      const refreshedAccounts = loadAccounts()
-      const refreshedMessages = shouldRefreshMessages
-        ? loadMessages(
-            toMessageQuery(
-              currentAccountId,
-              filters,
-              { limit: MESSAGE_LIST_PAGE_SIZE, offset: 0 },
-              searchKeyword
-            )
-          )
-        : Promise.resolve<Message[] | null>(null)
-      const [nextAccounts, nextMessages] = await Promise.all([refreshedAccounts, refreshedMessages])
-
-      setAccounts(nextAccounts)
-
-      if (nextMessages) {
-        replaceMessages(nextMessages)
-      }
-    },
-    [filters, replaceMessages, searchKeyword, selectedAccountId]
-  )
+  const refreshMailbox = React.useCallback(async (): Promise<void> => {
+    await Promise.all([
+      refreshAccounts(),
+      queryClient.invalidateQueries({ queryKey: ['conversations'] }, { cancelRefetch: false })
+    ])
+  }, [refreshAccounts])
 
   const reloadInitialData = React.useCallback(async () => {
     const [data, nextAiSettings] = await Promise.all([
@@ -320,11 +205,7 @@ export function MailboxWorkspace(): React.JSX.Element {
     setLocale(normalizeLocale(data.settings.locale))
     setSystemInfo(data.systemInfo)
     setSelectedAccountId(data.selectedAccountId)
-    setFilters([])
-    setSearchKeyword('')
-    clearSelection()
-    replaceMessages(data.messages, { selectFirst: true })
-  }, [clearSelection, replaceMessages, setLocale])
+  }, [setLocale])
 
   const reloadAfterBackupImport = React.useCallback(async () => {
     await reloadInitialData()
@@ -349,7 +230,6 @@ export function MailboxWorkspace(): React.JSX.Element {
         setLocale(normalizeLocale(data.settings.locale))
         setSystemInfo(data.systemInfo)
         setSelectedAccountId(data.selectedAccountId)
-        replaceMessages(data.messages, { selectFirst: true })
       } catch (loadError) {
         if (!cancelled) {
           setError(getErrorMessage(loadError, t('mailbox.loadDataError')))
@@ -364,15 +244,39 @@ export function MailboxWorkspace(): React.JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [replaceMessages, setLocale, t])
+  }, [setLocale, t])
 
   React.useEffect(() => {
-    return onMailboxChanged((event) => {
-      void refreshVisibleMailbox(event.accountId).catch((refreshError) => {
-        setError(getErrorMessage(refreshError, t('mailbox.refreshMailError')))
-      })
-    })
-  }, [refreshVisibleMailbox, t])
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const refresh = () => {
+      if (timer) return
+      timer = setTimeout(() => {
+        timer = undefined
+        void refreshMailbox().catch((refreshError) => {
+          setError(getErrorMessage(refreshError, t('mailbox.refreshMailError')))
+        })
+      }, 250)
+    }
+    const offMailbox = onMailboxChanged(refresh)
+    const offSent = window.api.compose.onSent(refresh)
+    return () => {
+      offMailbox(); offSent()
+      if (timer) clearTimeout(timer)
+    }
+  }, [refreshMailbox, t])
+
+  React.useEffect(() => onSyncProgress((progress) => {
+    clearSyncing(String(progress.accountId))
+    if (!progress.ok) {
+      setSyncFailures((current) => [
+        ...current.filter((failure) => failure.accountId !== progress.accountId),
+        { accountId: progress.accountId, error: progress.error?.trim() || t('sync.error') }
+      ])
+    }
+    setNotice((current) => current.state === 'running' ? {
+      ...current, message: t('mailbox.syncProgress', { completed: progress.completed, total: progress.total })
+    } : current)
+  }), [clearSyncing, setNotice, t])
 
   React.useEffect(() => {
     return onNewMail((notification) => {
@@ -413,53 +317,6 @@ export function MailboxWorkspace(): React.JSX.Element {
     }
   }, [])
 
-  const openRouteTarget = React.useCallback(
-    async (accountId: string, messageId?: string): Promise<void> => {
-      setError(null)
-      setSelectedAccountId(accountId)
-      setFilters([])
-      setSearchKeyword('')
-
-      const nextMessages = await loadMessages(
-        toMessageQuery(accountId, [], { limit: MESSAGE_LIST_PAGE_SIZE, offset: 0 }, '')
-      )
-      const numericMessageId = messageId ? Number(messageId) : undefined
-      const targetMessage =
-        numericMessageId !== undefined && Number.isFinite(numericMessageId)
-          ? (nextMessages.find((message) => message.messageId === numericMessageId) ??
-            (await loadMessageDetail(numericMessageId)))
-          : nextMessages[0]
-      const visibleMessages =
-        targetMessage && !nextMessages.some((message) => message.id === targetMessage.id)
-          ? [targetMessage, ...nextMessages]
-          : nextMessages
-
-      replaceMessages(visibleMessages)
-      if (targetMessage) {
-        window.setTimeout(() => selectMessage(targetMessage.id), 0)
-      }
-    },
-    [replaceMessages, selectMessage]
-  )
-
-  React.useEffect(() => {
-    if (loading || !routeAccountId || !routeMessageId) return
-    const currentRoute = toMailboxRoute(routeAccountId, routeMessageId)
-    if (internalRouteRef.current === currentRoute) {
-      internalRouteRef.current = null
-      return
-    }
-    void openRouteTarget(routeAccountId, routeMessageId).catch((openError) => {
-      setError(getErrorMessage(openError, t('mailbox.openRouteError')))
-    })
-  }, [loading, openRouteTarget, routeAccountId, routeMessageId, t])
-
-  React.useEffect(() => {
-    if (routeAccountId && routeMessageId) return
-    internalRouteRef.current = '/'
-    navigate('/', { replace: true })
-  }, [navigate, routeAccountId, routeMessageId])
-
   const syncCreatedAccountInBackground = React.useCallback(
     (accountId: number, accountEmail: string, startedAt: Date): void => {
       const accountKey = String(accountId)
@@ -471,8 +328,7 @@ export function MailboxWorkspace(): React.JSX.Element {
 
       void syncAccount(accountId, 'initial')
         .then(async (syncResult) => {
-          await refreshAccounts()
-          await refreshMessages(String(accountId), filters, searchKeyword)
+          await refreshMailbox()
           finishSyncing(accountKey, 'success', {
             label: accountEmail,
             startedAt,
@@ -499,11 +355,8 @@ export function MailboxWorkspace(): React.JSX.Element {
     },
     [
       accounts,
-      filters,
       finishSyncing,
-      refreshAccounts,
-      refreshMessages,
-      searchKeyword,
+      refreshMailbox,
       startSyncing,
       t
     ]
@@ -519,9 +372,7 @@ export function MailboxWorkspace(): React.JSX.Element {
         .then(async (nextAccounts) => {
           setAccounts(nextAccounts)
           setSelectedAccountId(nextSelectedAccountId)
-          await refreshMessages(nextSelectedAccountId, filters, searchKeyword, {
-            selectFirst: true
-          })
+          await queryClient.invalidateQueries({ queryKey: ['conversations'] })
         })
         .catch((refreshError) => {
           setError(getErrorMessage(refreshError, t('mailbox.refreshAccountError')))
@@ -539,7 +390,7 @@ export function MailboxWorkspace(): React.JSX.Element {
         })
       }
     })
-  }, [filters, refreshMessages, searchKeyword, setNotice, syncCreatedAccountInBackground, t])
+  }, [setNotice, syncCreatedAccountInBackground, t])
 
   function handleOpenAddAccountWindow(): void {
     void openAddAccountWindow().catch((openError) => {
@@ -574,8 +425,7 @@ export function MailboxWorkspace(): React.JSX.Element {
         throw syncError
       }
     }
-    await refreshAccounts()
-    await refreshMessages(String(account.accountId), filters, searchKeyword)
+    await refreshMailbox()
     setDialogKind(null)
     setDialogAccountId(null)
   }
@@ -596,12 +446,8 @@ export function MailboxWorkspace(): React.JSX.Element {
       !nextAccounts.some((item) => item.id === selectedAccountId)
     ) {
       setSelectedAccountId(nextSelectedAccountId)
-      if (nextSelectedAccountId) {
-        await refreshMessages(nextSelectedAccountId, filters, searchKeyword)
-      } else {
-        clearMessages()
-      }
     }
+    await queryClient.invalidateQueries({ queryKey: ['conversations'] })
     setDialogKind(null)
     setDialogAccountId(null)
   }
@@ -644,6 +490,8 @@ export function MailboxWorkspace(): React.JSX.Element {
   }
 
   async function handleRefreshAccount(account: Account): Promise<void> {
+    if (syncingAccountIds.has('all') || syncingAccountIds.has(account.id)) return
+    setSyncFailures((current) => account.id === 'all' ? [] : current.filter((failure) => failure.accountId !== account.accountId))
     const startedAt = new Date()
     const syncMessage =
       account.id === 'all'
@@ -663,12 +511,13 @@ export function MailboxWorkspace(): React.JSX.Element {
         await syncAccount(account.accountId)
       } else if (account.id === 'all') {
         const syncResult = await syncAllAccounts()
-        syncFailureMessage = getSyncAllFailureMessage(syncResult, accounts)
+        const failures = getSyncAllFailures(syncResult)
+        setSyncFailures(failures)
+        syncFailureMessage = failures.length ? t('mailbox.syncFailureCount', { count: failures.length }) : null
       } else {
         return
       }
-      await refreshAccounts()
-      await refreshMessages(selectedAccountId, filters, searchKeyword)
+      await refreshMailbox()
       if (syncFailureMessage) {
         throw new Error(syncFailureMessage)
       }
@@ -689,7 +538,7 @@ export function MailboxWorkspace(): React.JSX.Element {
         setDialogAccountId(account.id)
         setDialogKind('edit')
       }
-      setError(message)
+      setError(account.accountId ? `${account.address || account.name}：${message}` : message)
       finishSyncing(account.id, 'error', {
         label: account.name,
         startedAt,
@@ -811,95 +660,12 @@ export function MailboxWorkspace(): React.JSX.Element {
     }
   }
 
-  async function handleMarkSelectedRead(): Promise<void> {
-    if (markingRead || selectedMessages.length === 0) return
-
-    try {
-      const result = await markMessagesRead(selectedMessages)
-      clearSelection()
-
-      if (filters.includes('unread')) {
-        await refreshMessages(selectedAccountId, filters, searchKeyword)
-      }
-
-      showMarkReadResult(result.updatedCount, result.failedCount)
-    } catch (markReadError) {
-      const messageText = getErrorMessage(markReadError, t('mailbox.readStateError'))
-      setError(messageText)
-      toast.error(messageText)
-    }
-  }
-
-  async function handleMarkAllRead(): Promise<void> {
-    if (markingRead || selectedAccount.unread === 0) return
-
-    try {
-      const result = await markCurrentQueryRead(
-        toMessageQuery(selectedAccountId, filters, undefined, searchKeyword)
-      )
-
-      if (filters.includes('unread')) {
-        await refreshMessages(selectedAccountId, filters, searchKeyword)
-      }
-
-      showMarkReadResult(result.updatedCount, result.failedCount)
-    } catch (markReadError) {
-      const messageText = getErrorMessage(markReadError, t('mailbox.readStateError'))
-      setError(messageText)
-      toast.error(messageText)
-    }
-  }
-
-  function showMarkReadResult(updatedCount: number, failedCount: number): void {
-    if (updatedCount > 0) {
-      toast.success(t('mailbox.markReadSuccess', { count: updatedCount }))
-    } else if (failedCount === 0) {
-      toast.info(t('mailbox.markReadNoop'))
-    }
-
-    if (failedCount > 0) {
-      toast.error(t('mailbox.markReadPartialFailed', { count: failedCount }))
-    }
-  }
-
   function handleSelectAccount(accountId: string): void {
-    if (!accountId) return
-    navigateToMailboxRoute()
-    setSelectedAccountId(accountId)
-    void refreshMessages(accountId, filters, searchKeyword, { selectFirst: true }).catch(
-      (refreshError) => {
-        setError(getErrorMessage(refreshError, t('mailbox.refreshMailError')))
-      }
-    )
-  }
-
-  function handleSelectMessage(messageId: string): void {
-    selectMessage(messageId)
-    navigateToMailboxRoute(selectedAccountId, messageId)
-  }
-
-  function navigateToMailboxRoute(accountId?: string, messageId?: string): void {
-    const route = toMailboxRoute(accountId, messageId)
-    internalRouteRef.current = route
-    navigate(route, { replace: false })
-  }
-
-  function handleChangeFilters(nextFilters: MailFilterTag[]): void {
-    setFilters(nextFilters)
-    void refreshMessages(selectedAccountId, nextFilters, searchKeyword).catch((refreshError) => {
-      setError(getErrorMessage(refreshError, t('mailbox.refreshMailError')))
-    })
-  }
-
-  function handleChangeSearchKeyword(nextSearchKeyword: string): void {
-    setSearchKeyword(nextSearchKeyword)
-    void refreshMessages(selectedAccountId, filters, nextSearchKeyword).catch((refreshError) => {
-      setError(getErrorMessage(refreshError, t('mailbox.searchMailError')))
-    })
+    if (accountId) setSelectedAccountId(accountId)
   }
 
   return (
-    <main className="native-window flex h-screen min-h-screen flex-col overflow-hidden text-foreground">
+    <main data-workspace="conversations" className="native-window flex h-screen min-h-screen flex-col overflow-hidden text-foreground">
       {showNoAccounts ? (
         <>
           <div className="relative shrink-0">
@@ -921,19 +687,19 @@ export function MailboxWorkspace(): React.JSX.Element {
         </>
       ) : (
         <ResizablePanelGroup
-          id="onemail-main-layout-v3"
+          id="onemail-conversation-layout-v1"
           orientation="horizontal"
-          defaultLayout={mainLayout.defaultLayout}
-          onLayoutChanged={mainLayout.onLayoutChanged}
+          defaultLayout={conversationLayout.defaultLayout}
+          onLayoutChanged={conversationLayout.onLayoutChanged}
           className="min-h-0 flex-1 overflow-hidden"
         >
           <ResizablePanel
             id="accounts"
-            defaultSize="340px"
-            minSize="260px"
+            defaultSize="260px"
+            minSize="220px"
             groupResizeBehavior="preserve-pixel-size"
           >
-            <div className="flex h-full min-h-0 flex-col">
+            <div className="workspace-sidebar flex h-full min-h-0 flex-col">
               <TitleBar
                 platform={systemInfo?.platform}
                 onAddAccount={handleOpenAddAccountWindow}
@@ -967,88 +733,28 @@ export function MailboxWorkspace(): React.JSX.Element {
 
           <ResizableHandle />
 
-          <ResizablePanel
-            id="messages"
-            defaultSize="420px"
-            minSize="320px"
-            groupResizeBehavior="preserve-pixel-size"
-          >
-            <MailList
-              account={selectedAccount}
-              messages={messages}
-              selectedMessageId={selectedMessageId}
-              filters={filters}
-              searchKeyword={searchKeyword}
-              loading={loading}
-              loadingMore={messagePage.loadingMore}
-              hasMore={messagePage.hasMore}
-              error={error}
-              onSelectMessage={handleSelectMessage}
-              onChangeFilters={handleChangeFilters}
-              onChangeSearchKeyword={handleChangeSearchKeyword}
-              onLoadMore={loadMoreMessages}
-              onMarkAllRead={() => {
-                void handleMarkAllRead()
-              }}
-              selectedMessageIds={selectedMessageIds}
-              allVisibleSelected={allVisibleSelected}
-              someVisibleSelected={someVisibleSelected}
-              selectionDisabled={deleting || markingRead}
-              composePending={composerPending}
-              outboxPending={outboxPending}
-              onCompose={() => {
-                void openComposer('new')
-              }}
-              onOpenOutbox={() => setOutboxOpen(true)}
-              onToggleMessageSelection={toggleMessageSelection}
-              onSelectAllVisible={selectAllVisible}
-              onClearSelection={clearSelection}
-              onMarkSelectedRead={() => {
-                void handleMarkSelectedRead()
-              }}
-              onDeleteSelected={() => requestDeleteMessages(selectedMessages)}
-            />
-          </ResizablePanel>
-
-          <ResizableHandle />
-
-          <ResizablePanel id="reader" minSize="420px">
-            <article className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
-              {selectedMessage ? (
-                <MailReader
-                  message={selectedMessage}
-                  recipientAddress={selectedMessageAccount?.address ?? selectedAccount.address}
-                  loading={!selectedMessage.detailLoaded || loadingMessageId === selectedMessage.id}
-                  loadingBody={loadingBodyMessageId === selectedMessage.id}
-                  externalImagesBlocked={settings?.externalImagesBlocked ?? true}
-                  downloadingAttachmentIds={downloadingAttachmentIds}
-                  actionPending={composerPending}
-                  deleting={deletingMessageIds.has(selectedMessage.id)}
-                  onLoadBody={() => loadMessageBody(selectedMessage)}
-                  onDownloadAttachment={(attachment) => {
-                    if (attachment.id !== undefined) {
-                      downloadMessageAttachment(selectedMessage, attachment.id)
-                    }
-                  }}
-                  onReply={() => {
-                    void openComposer('reply', selectedMessage)
-                  }}
-                  onForward={() => {
-                    void openComposer('forward', selectedMessage)
-                  }}
-                  onDelete={() => requestDeleteMessages([selectedMessage])}
-                />
-              ) : (
-                <div className="flex min-h-0 flex-1 items-center justify-center p-8 text-xs text-muted-foreground">
-                  {t('mailbox.selectPreview')}
-                </div>
-              )}
+          <ResizablePanel id="conversations" data-workspace-content minSize="600px">
+            <div className="flex h-full min-h-0 flex-col overflow-hidden">
+              <ConversationWorkspace
+                accounts={realAccounts}
+                settings={settings}
+                accountId={selectedAccount.accountId}
+                refreshKey={aiSessionEpoch}
+                onCompose={() => { void openComposer('new') }}
+                onOpenOutbox={() => setOutboxOpen(true)}
+              />
               <StatusBar
                 systemInfo={systemInfo}
                 settings={settings}
                 accountCount={realAccounts.length}
-                messageCount={selectedAccount.messageCount ?? messages.length}
+                messageCount={selectedAccount.messageCount ?? 0}
                 syncNotice={syncNotice}
+                error={error}
+                syncErrors={syncFailures.map((failure) => {
+                  const account = accounts.find((item) => item.accountId === failure.accountId)
+                  return `${account?.address || account?.name || `#${failure.accountId}`}：${failure.error}`
+                })}
+                onDismissError={() => { setError(null); setSyncFailures([]) }}
                 updateStatus={updateStatus}
                 onOpenVersion={() => {
                   if (hasAvailableUpdate(updateStatus)) {
@@ -1058,11 +764,9 @@ export function MailboxWorkspace(): React.JSX.Element {
                   setSettingsInitialSection('about')
                   setDialogKind('settings')
                 }}
-                onInstallUpdate={() => {
-                  void installAppUpdate()
-                }}
+                onInstallUpdate={() => { void installAppUpdate() }}
               />
-            </article>
+            </div>
           </ResizablePanel>
         </ResizablePanelGroup>
       )}
@@ -1126,8 +830,6 @@ export function MailboxWorkspace(): React.JSX.Element {
           key={aiSessionEpoch}
           settings={aiSettings}
           launcherHidden={composerOpen}
-          messageId={selectedMessage?.messageId}
-          messageSubject={selectedMessage?.subject}
           onChat={handleAiChat}
         />
       ) : null}
@@ -1162,11 +864,7 @@ export function MailboxWorkspace(): React.JSX.Element {
         pending={outboxPending}
         outboxMessages={outboxMessages}
         onOpenChange={setOutboxOpen}
-        onRefresh={() => {
-          void refreshOutbox().catch((refreshError) => {
-            setError(getErrorMessage(refreshError, t('mailbox.loadOutboxError')))
-          })
-        }}
+        onRefresh={handleRefreshOutbox}
         onOpenDraft={(message) => {
           setOutboxOpen(false)
           openOutboxDraft(message)
@@ -1178,25 +876,6 @@ export function MailboxWorkspace(): React.JSX.Element {
           void handleDeleteOutbox(message)
         }}
       />
-      <DeleteMessageDialog
-        open={Boolean(deleteRequest)}
-        messages={deleteRequest?.messages ?? []}
-        pending={deleting}
-        onOpenChange={(open) => {
-          if (!open) cancelDelete()
-        }}
-        onConfirm={() => {
-          void confirmDelete()
-        }}
-      />
     </main>
   )
-}
-
-function toMailboxRoute(accountId?: string, messageId?: string): string {
-  if (!accountId) return '/'
-  if (accountId === 'all' && !messageId) return '/'
-  return messageId
-    ? `/${encodeURIComponent(accountId)}/${encodeURIComponent(messageId)}`
-    : `/${encodeURIComponent(accountId)}`
 }

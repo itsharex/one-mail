@@ -1,7 +1,5 @@
 import type { AccountConnectionStatus } from '@renderer/shared/types'
 
-export type MailFilterTag = 'unread' | 'starred' | 'today' | 'yesterday' | 'last7'
-
 export type Account = {
   id: string
   accountId?: number

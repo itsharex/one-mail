@@ -2,7 +2,7 @@ use std::fs;
 
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::{db, smtp_send, state::AppState};
@@ -79,16 +79,25 @@ pub fn compose_list_outbox(
          ORDER BY updated_at DESC LIMIT ?"
     );
     let mut statement = connection.prepare(&sql).map_err(database_error)?;
-    let rows = statement
+    let mut rows = statement
         .query_map(params_from_iter(values.iter()), map_outbox)
         .map_err(database_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(database_error)?;
+    for row in &mut rows {
+        if let Some(outbox_id) = row.get("outboxId").and_then(Value::as_i64) {
+            row["attachments"] = list_outbox_attachments(&connection, outbox_id)?;
+        }
+    }
     Ok(Value::Array(rows))
 }
 
 #[tauri::command]
 pub fn compose_save_draft(state: State<'_, AppState>, input: Value) -> Result<Value, String> {
+    save_draft(&state, input)
+}
+
+fn save_draft(state: &AppState, input: Value) -> Result<Value, String> {
     let object = require_object(&input)?;
     let account_id = required_i64(object, "accountId", "账号 ID 无效。")?;
     let compose_kind = optional_string(object, "mode").unwrap_or_else(|| "new".to_string());
@@ -99,7 +108,8 @@ pub fn compose_save_draft(state: State<'_, AppState>, input: Value) -> Result<Va
         .map_err(|error| error.to_string())?;
     let bcc_json = serde_json::to_string(object.get("bcc").unwrap_or(&json!([])))
         .map_err(|error| error.to_string())?;
-    let connection = db::open(&state)?;
+    let mut database = db::open(state)?;
+    let connection = database.transaction().map_err(database_error)?;
     let from_email: String = connection
         .query_row(
             "SELECT email FROM onemail_mail_accounts WHERE account_id=?1",
@@ -113,7 +123,7 @@ pub fn compose_save_draft(state: State<'_, AppState>, input: Value) -> Result<Va
             .execute(
                 "UPDATE onemail_outbox_messages SET compose_kind=?2,related_message_id=?3,
                   to_json=?4,cc_json=?5,bcc_json=?6,subject=?7,body_text=?8,body_html=?9,
-                  in_reply_to=?10,references_header=?11,status='draft',
+                  in_reply_to=?10,references_header=?11,account_id=?12,from_email=?13,status='draft',
                   updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE outbox_id=?1",
                 params![
                     outbox_id,
@@ -126,7 +136,9 @@ pub fn compose_save_draft(state: State<'_, AppState>, input: Value) -> Result<Va
                     optional_string(object, "bodyText"),
                     optional_string(object, "bodyHtml"),
                     optional_string(object, "inReplyTo"),
-                    optional_string(object, "referencesHeader")
+                    optional_string(object, "referencesHeader"),
+                    account_id,
+                    from_email
                 ],
             )
             .map_err(database_error)?;
@@ -162,7 +174,29 @@ pub fn compose_save_draft(state: State<'_, AppState>, input: Value) -> Result<Va
             .map_err(database_error)?;
     }
     let id = outbox_id.unwrap_or_else(|| connection.last_insert_rowid());
-    get_outbox(&connection, id)?.ok_or_else(|| "保存草稿后无法读取记录。".to_string())
+    if let Some(attachments) = object.get("attachments").and_then(Value::as_array) {
+        connection.execute("DELETE FROM onemail_outbox_attachments WHERE outbox_id=?1", [id])
+            .map_err(database_error)?;
+        for attachment in attachments {
+            let attachment = require_object(attachment)?;
+            let path = optional_string(attachment, "filePath")
+                .filter(|path| !path.trim().is_empty())
+                .ok_or_else(|| "附件路径不能为空。".to_string())?;
+            connection.execute(
+                "INSERT INTO onemail_outbox_attachments
+                   (outbox_id,source_kind,file_path,filename,mime_type,size_bytes)
+                 VALUES (?1,'local_file',?2,?3,?4,?5)",
+                params![id, path,
+                    optional_string(attachment, "filename").or_else(|| optional_string(attachment, "name"))
+                        .unwrap_or_else(|| "attachment".to_string()),
+                    optional_string(attachment, "mimeType"),
+                    optional_i64(attachment, "sizeBytes").unwrap_or(0).max(0)],
+            ).map_err(database_error)?;
+        }
+    }
+    let result = get_outbox(&connection, id)?.ok_or_else(|| "保存草稿后无法读取记录。".to_string())?;
+    connection.commit().map_err(database_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -192,17 +226,28 @@ pub fn compose_create_forward_draft(
 }
 
 #[tauri::command]
-pub async fn compose_send(state: State<'_, AppState>, input: Value) -> Result<Value, String> {
-    smtp_send::send_message(&state, input).await
+pub async fn compose_send(app: AppHandle, state: State<'_, AppState>, mut input: Value) -> Result<Value, String> {
+    let saved = save_draft(&state, input.clone())?;
+    input["outboxId"] = saved["outboxId"].clone();
+    input["rfc822MessageId"] = saved["rfc822MessageId"].clone();
+    input["attachments"] = saved["attachments"].clone();
+    let mut result = smtp_send::send_message(&state, input).await?;
+    result["accountId"] = saved["accountId"].clone();
+    let _ = app.emit("compose/sent", &result);
+    Ok(result)
 }
 
 #[tauri::command]
-pub async fn compose_retry(state: State<'_, AppState>, outbox_id: i64) -> Result<Value, String> {
+pub async fn compose_retry(app: AppHandle, state: State<'_, AppState>, outbox_id: i64) -> Result<Value, String> {
     let connection = db::open(&state)?;
     let outbox = get_outbox(&connection, outbox_id)?
         .ok_or_else(|| format!("发信记录不存在：{outbox_id}"))?;
     drop(connection);
-    smtp_send::send_message(&state, outbox).await
+    let account_id = outbox["accountId"].clone();
+    let mut result = smtp_send::send_message(&state, outbox).await?;
+    result["accountId"] = account_id;
+    let _ = app.emit("compose/sent", &result);
+    Ok(result)
 }
 
 fn map_outbox(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -236,7 +281,7 @@ fn map_outbox(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
 }
 
 fn get_outbox(connection: &Connection, outbox_id: i64) -> Result<Option<Value>, String> {
-    connection
+    let mut outbox = connection
         .query_row(
             "SELECT outbox_id,account_id,related_message_id,compose_kind,status,
                     rfc822_message_id,from_name,from_email,to_json,cc_json,bcc_json,
@@ -247,7 +292,25 @@ fn get_outbox(connection: &Connection, outbox_id: i64) -> Result<Option<Value>, 
             map_outbox,
         )
         .optional()
-        .map_err(database_error)
+        .map_err(database_error)?;
+    if let Some(outbox) = outbox.as_mut() {
+        outbox["attachments"] = list_outbox_attachments(connection, outbox_id)?;
+    }
+    Ok(outbox)
+}
+
+fn list_outbox_attachments(connection: &Connection, outbox_id: i64) -> Result<Value, String> {
+    let mut statement = connection.prepare(
+        "SELECT file_path,filename,mime_type,size_bytes FROM onemail_outbox_attachments
+         WHERE outbox_id=?1 ORDER BY attachment_id",
+    ).map_err(database_error)?;
+    let attachments = statement.query_map([outbox_id], |row| Ok(json!({
+        "filePath": row.get::<_, Option<String>>(0)?,
+        "filename": row.get::<_, String>(1)?,
+        "mimeType": row.get::<_, Option<String>>(2)?,
+        "sizeBytes": row.get::<_, i64>(3)?
+    }))).map_err(database_error)?.collect::<Result<Vec<_>, _>>().map_err(database_error)?;
+    Ok(Value::Array(attachments))
 }
 
 fn delete_outbox(state: &AppState, outbox_id: i64) -> Result<bool, String> {
@@ -273,6 +336,13 @@ fn create_related_draft(state: &AppState, input: &Value, forward: bool) -> Resul
     let subject = optional_string(detail_object, "subject").unwrap_or_default();
     let account_id = optional_i64(detail_object, "accountId").unwrap_or_default();
     let from_email = optional_string(detail_object, "fromEmail").unwrap_or_default();
+    crate::mail_body::participants_need_repair(&connection, message_id)?;
+    let mut accounts = connection.prepare("SELECT LOWER(TRIM(email)) FROM onemail_mail_accounts")
+        .map_err(database_error)?;
+    let own_addresses = accounts.query_map([], |row| row.get::<_, String>(0))
+        .map_err(database_error)?.collect::<Result<std::collections::HashSet<_>, _>>()
+        .map_err(database_error)?;
+    let outgoing = own_addresses.contains(&from_email.trim().to_lowercase());
     let mode = optional_string(object, "mode")
         .unwrap_or_else(|| if forward { "forward" } else { "reply" }.to_string());
     let next_subject = if forward {
@@ -280,14 +350,58 @@ fn create_related_draft(state: &AppState, input: &Value, forward: bool) -> Resul
     } else {
         format_subject("Re:", &subject)
     };
+    let mut to = Vec::new();
+    let mut cc = Vec::new();
+    let mut seen = own_addresses;
+    if !forward {
+        let mut statement = connection.prepare(
+            "SELECT kind,name,email FROM onemail_message_addresses WHERE message_id=?1
+             ORDER BY sort_order,address_id",
+        ).map_err(database_error)?;
+        let addresses = statement.query_map([message_id], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?,
+        ))).map_err(database_error)?.collect::<Result<Vec<_>, _>>().map_err(database_error)?;
+        let target_kind = if outgoing { "to" }
+            else if addresses.iter().any(|address| address.0 == "reply_to") { "reply_to" }
+            else { "from" };
+        let mut add = |kind: &str, target: &mut Vec<Value>| {
+            for (_, name, email) in addresses.iter().filter(|address| address.0 == kind) {
+                if seen.insert(email.trim().to_lowercase()) {
+                    target.push(json!({ "name": name, "email": email }));
+                }
+            }
+        };
+        add(target_kind, &mut to);
+        if mode == "reply_all" {
+            add("to", &mut to);
+            add("cc", &mut cc);
+        }
+        if target_kind == "from" && to.is_empty() && !from_email.trim().is_empty()
+            && seen.insert(from_email.trim().to_lowercase()) {
+            to.push(json!({ "email": from_email }));
+        }
+    }
+    let in_reply_to = (!forward).then(|| optional_string(detail_object, "messageRfc822Id")).flatten();
+    let references = if forward { None } else {
+        let mut references = optional_string(detail_object, "references").unwrap_or_default();
+        if let Some(message_id) = in_reply_to.as_deref() {
+            if !references.split_whitespace().any(|reference| reference == message_id) {
+                if !references.is_empty() { references.push(' '); }
+                references.push_str(message_id);
+            }
+        }
+        (!references.is_empty()).then_some(references)
+    };
     Ok(json!({
         "accountId": account_id,
         "mode": mode,
         "relatedMessageId": message_id,
-        "to": if forward || from_email.is_empty() { json!([]) } else { json!([{ "email": from_email }]) },
-        "cc": [],
+        "to": to,
+        "cc": cc,
         "bcc": [],
         "subject": next_subject,
+        "inReplyTo": in_reply_to,
+        "referencesHeader": references,
         "bodyText": "",
         "bodyHtml": null
     }))

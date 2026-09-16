@@ -43,6 +43,8 @@ pub fn run() {
             data::accounts::accounts_remove,
             data::logos_get,
             data::messages::messages_list,
+            data::conversations::conversations_list,
+            data::conversations::conversations_messages,
             data::messages::messages_stats,
             data::messages::messages_get,
             data::messages::messages_load_body,

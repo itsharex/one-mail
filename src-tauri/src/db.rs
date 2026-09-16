@@ -168,8 +168,12 @@ fn column_exists(
 }
 
 pub fn open(state: &AppState) -> Result<Connection, String> {
+    open_path(&state.database_path)
+}
+
+pub(crate) fn open_path(path: &std::path::Path) -> Result<Connection, String> {
     let connection = Connection::open_with_flags(
-        &state.database_path,
+        path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,

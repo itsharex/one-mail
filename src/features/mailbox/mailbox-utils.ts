@@ -1,4 +1,4 @@
-import type { Account, MailFilterTag, Message } from '@renderer/components/mail/types'
+import type { Account } from '@renderer/components/mail/types'
 
 export function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) return error.message
@@ -35,11 +35,6 @@ export function shouldEditCredential(message: string): boolean {
   return /凭据不存在|凭据格式无效|凭据解密失败|重新保存密码/.test(message)
 }
 
-export function shouldAutoLoadBody(message: Message): boolean {
-  if (message.bodyLoaded) return false
-  return message.bodyStatus !== 'error'
-}
-
 export function getNextSelectedAccountId(
   accounts: Account[],
   removedAccountId: string,
@@ -53,30 +48,6 @@ export function getNextSelectedAccountId(
     return currentAccountId
   }
   return accounts.find((account) => account.id === 'all')?.id ?? accounts[0]?.id ?? ''
-}
-
-export function decrementUnreadCount(accounts: Account[], accountId: number): Account[] {
-  return accounts.map((account) => {
-    if (account.id !== 'all' && account.accountId !== accountId) return account
-    return {
-      ...account,
-      unread: Math.max(0, account.unread - 1)
-    }
-  })
-}
-
-export function mergeMessagesById(current: Message[], nextMessages: Message[]): Message[] {
-  const existingIds = new Set(current.map((message) => message.id))
-  const uniqueNextMessages = nextMessages.filter((message) => !existingIds.has(message.id))
-  return [...current, ...uniqueNextMessages]
-}
-
-export function getMessageListScopeKey(
-  accountId: string,
-  filters: MailFilterTag[],
-  searchKeyword: string
-): string {
-  return `${accountId}:${[...filters].sort().join(',')}:${searchKeyword.trim()}`
 }
 
 export function getFallbackAccount(): Account {

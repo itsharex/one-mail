@@ -40,11 +40,13 @@ OneMail is a local-first desktop mail client built with Tauri 2, Rust, React, an
 
 ## Interface
 
-OneMail uses a three-column desktop layout:
+OneMail uses a people-centered **Conversations** layout:
 
-1. **Account sidebar**: manage mail accounts, view unread counts, and sync one or all accounts.
-2. **Message list**: browse the selected account or unified inbox with quick filters.
-3. **Reader**: view subject, sender, recipients, safe preview status, message body, and attachments.
+1. **Account sidebar**: filter conversations by account and manage accounts and synchronization.
+2. **People list**: group correspondence by email address, with separate groups for public participants in multi-person mail; search and pagination are supported.
+3. **Conversation pane**: merge received mail and locally sent messages, separate topics, collapse quoted text and signatures, and load bodies automatically as messages enter the viewport. Reply inline or start a new topic with the sending account, recipients, and CC clearly shown.
+
+URLs and labeled links in message bodies open in the system default browser. Historical participant data is filled during synchronization; correspondence not yet synchronized locally is absent. BCC-only sent records remain in the outbox, and BCC addresses never enter the public conversation participant list.
 
 The composer is a floating Gmail-like window. It can expand or restore, CC/BCC fields open on demand, and the footer contains send, formatting, attachment, link, save-draft, and discard actions.
 
@@ -128,15 +130,13 @@ You can also run `make deploy`. It generates a Shanghai-time version, updates `p
 1. **Add an account**: click the add button and choose a common provider or custom IMAP.
 2. **Authorize it**: Gmail and Outlook can complete OAuth in the system browser; other providers use a password or authorization code as required.
 3. **Choose and sync folders**: password- and authorization-code accounts can discover and select IMAP folders first. Sync starts after saving and can also be triggered manually.
-4. **Filter and search**: use unread, starred, and date filters, or search local mail by keyword.
-5. **Mark messages read locally**: opening an unread message updates its local state, and bulk actions are available.
-6. **Read mail**: click a message to load its body. HTML mail opens in safe-preview mode first.
-7. **Load full content**: click the reader action when you need remote images.
-8. **View attachment details**: the reader shows the name, type, and size of received attachments.
-9. **Compose and reply**: use compose, reply, reply all, or forward. Expand CC/BCC, toggle formatting tools, and attach local files as needed.
-10. **Save or discard drafts**: closing a non-empty composer saves a draft. The trash button discards a saved draft.
-11. **Optionally configure AI**: verify your own AI service in Settings, then chat or summarize, extract tasks, and draft replies for the current email.
-12. **Back up data**: export a `.onemail` backup in Settings and restore from a local backup.
+4. **Find conversations**: filter by account or search the people list by name or email address.
+5. **Read mail**: messages load their bodies and update their local read state when visible. Expand or collapse long bodies.
+6. **Open links and images**: message links open in the default browser; HTML mode can load remote images for an individual message.
+7. **Compose and reply**: start a conversation, reply inline, or create a new topic. The composer supports CC, BCC, and local attachments.
+8. **Manage drafts and the outbox**: closing a non-empty composer saves a draft. Continue editing, retry sending, or delete records in the outbox.
+9. **Optionally configure AI**: verify your own AI service in Settings to use the chat assistant.
+10. **Back up data**: export a `.onemail` backup in Settings and restore from a local backup.
 
 ---
 

@@ -173,11 +173,6 @@
     backdrop-filter: saturate(1.15) blur(14px);
     -webkit-backdrop-filter: saturate(1.15) blur(14px);
   }
-
-  .mail-reader-scroll {
-    scrollbar-gutter: stable;
-  }
-
   .mail-html {
     overflow-wrap: anywhere;
   }

@@ -7,6 +7,7 @@ import type {
   BackupImportProgress,
   MailSendResult,
   MailboxChangedEvent,
+  SyncProgressEvent,
   NewMailNotification,
   OneMailApi
 } from '@renderer/shared/types'
@@ -37,6 +38,10 @@ function subscribe<T>(eventName: string, callback: (payload: T) => void): () => 
 
 export function createDesktopApi(): OneMailApi {
   return {
+    conversations: {
+      list: (query) => command('conversations_list', { query }),
+      messages: (query) => command('conversations_messages', { query })
+    },
     accounts: {
       list: () => command('accounts_list'),
       create: (input) => command('accounts_create', { input }),
@@ -86,6 +91,7 @@ export function createDesktopApi(): OneMailApi {
       startAccount: (accountId, mode) =>
         command('sync_start_account', { accountId, mode }),
       status: () => command('sync_status'),
+      onProgress: (callback) => subscribe<SyncProgressEvent>('sync/progress', callback),
       onMailboxChanged: (callback) =>
         subscribe<MailboxChangedEvent>('sync/mailboxChanged', callback)
     },

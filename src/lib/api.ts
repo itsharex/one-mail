@@ -37,11 +37,11 @@ import type {
   OutboxMessage as SharedOutboxMessage,
   SettingsUpdateInput,
   SyncAllRunResult,
+  SyncProgressEvent,
   SyncMode,
   SystemInfo
 } from '@renderer/shared/types'
 import { normalizeMailBodyText, normalizeMailDisplayText } from '@renderer/shared/mail-text'
-import { ATTACHMENT_METADATA_PENDING_SIZE } from '@renderer/components/mail/mail-display'
 import type { Account, Message, MessageFolderRole } from '@renderer/components/mail/types'
 import { normalizeLocale, translate } from '@renderer/lib/i18n'
 
@@ -50,6 +50,8 @@ const platformLabel: Partial<Record<NodeJS.Platform, string>> = {
   win32: 'Windows',
   linux: 'Linux'
 }
+
+const ATTACHMENT_METADATA_PENDING_SIZE = '__pending__'
 
 export const MESSAGE_LIST_PAGE_SIZE = 100
 
@@ -159,7 +161,6 @@ export type OutboxMessage = {
 
 export async function loadInitialData(): Promise<{
   accounts: Account[]
-  messages: Message[]
   settings: AppSettings
   systemInfo: SystemInfo
   selectedAccountId: string
@@ -172,15 +173,9 @@ export async function loadInitialData(): Promise<{
   ])
   const accounts = toAccountList(mailAccounts, accountStats)
   const selectedAccountId = getDefaultSelectedAccountId(accounts)
-  const messages = selectedAccountId
-    ? await window.api.messages.list(
-        toMessageQuery(selectedAccountId, [], { limit: MESSAGE_LIST_PAGE_SIZE, offset: 0 })
-      )
-    : []
 
   return {
     accounts,
-    messages: messages.map(toMessage),
     settings,
     systemInfo,
     selectedAccountId
@@ -239,6 +234,10 @@ export async function syncAllAccounts(mode: SyncMode = 'refresh'): Promise<SyncA
   }
 
   return startAll(mode)
+}
+
+export function onSyncProgress(callback: (event: SyncProgressEvent) => void): () => void {
+  return window.api?.sync?.onProgress?.(callback) ?? (() => {})
 }
 
 export function onMailboxChanged(callback: (event: MailboxChangedEvent) => void): () => void {

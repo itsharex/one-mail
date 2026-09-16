@@ -213,8 +213,8 @@ function prepareDraft(
     kind,
     accountId,
     relatedMessageId: message?.messageId ?? draft.relatedMessageId,
-    to: draft.to.length > 0 ? draft.to : buildRecipients(kind, message),
-    cc: draft.cc.length > 0 ? draft.cc : kind === 'reply_all' ? splitAddresses(message?.cc) : [],
+    to: draft.to,
+    cc: draft.cc,
     subject: draft.subject || buildSubject(kind, message?.subject),
     bodyText: draft.bodyText || buildBody(kind, message),
     inReplyTo:
@@ -224,11 +224,6 @@ function prepareDraft(
       draft.references ??
       (kind === 'reply' || kind === 'reply_all' ? message?.references : undefined)
   }
-}
-
-function buildRecipients(kind: ComposeKind, message?: Message): string[] {
-  if (!message || kind === 'new' || kind === 'forward') return []
-  return splitAddresses(message.replyTo || message.fromAddress || message.from)
 }
 
 function buildSubject(kind: ComposeKind, subject = ''): string {
@@ -254,12 +249,4 @@ function buildBody(kind: ComposeKind, message?: Message): string {
   ]
 
   return lines.filter((line): line is string => line !== undefined).join('\n')
-}
-
-function splitAddresses(value?: string): string[] {
-  if (!value) return []
-  return value
-    .split(/[;,]/)
-    .map((item) => item.trim())
-    .filter(Boolean)
 }

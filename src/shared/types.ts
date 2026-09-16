@@ -1,3 +1,10 @@
+import type {
+  ConversationListQuery,
+  ConversationMessage,
+  ConversationMessagesQuery,
+  ConversationSummary
+} from './conversations'
+
 export type AccountStatus =
   | 'active'
   | 'disabled'
@@ -372,6 +379,15 @@ export type AccountSyncRunResult = SyncStatus & {
   updatedCount: number
 }
 
+export type SyncProgressEvent = {
+  accountId: number
+  completed: number
+  total: number
+  ok: boolean
+  skipped: boolean
+  error?: string | null
+}
+
 export type MailboxChangedEvent = {
   accountId: number
   reason: 'idle' | 'poll' | 'manual'
@@ -405,6 +421,7 @@ export type NotificationStatus = {
 }
 
 export type AppSettings = {
+  bodyDisplayMode: 'text' | 'html'
   syncIntervalMinutes: number
   syncWindowDays: number
   openAtLogin: boolean
@@ -561,6 +578,10 @@ export type AppUpdateStatus = {
 }
 
 export type OneMailApi = {
+  conversations: {
+    list: (query?: ConversationListQuery) => Promise<ConversationSummary[]>
+    messages: (query: ConversationMessagesQuery) => Promise<ConversationMessage[]>
+  }
   accounts: {
     list: () => Promise<MailAccount[]>
     create: (input: AccountCreateInput) => Promise<MailAccount>
@@ -606,6 +627,7 @@ export type OneMailApi = {
     startAll: (mode?: SyncMode) => Promise<SyncAllRunResult>
     startAccount: (accountId: number, mode?: SyncMode) => Promise<AccountSyncRunResult>
     status: () => Promise<SyncStatus>
+    onProgress: (callback: (event: SyncProgressEvent) => void) => () => void
     onMailboxChanged: (callback: (event: MailboxChangedEvent) => void) => () => void
   }
   notifications: {

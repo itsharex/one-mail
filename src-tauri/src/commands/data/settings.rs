@@ -15,6 +15,7 @@ pub fn settings_get(state: State<'_, AppState>) -> Result<Value, String> {
         "syncWindowDays": read_setting_i64(&connection, "sync_window_days", 90)?,
         "openAtLogin": read_setting_bool(&connection, "open_at_login", false)?,
         "externalImagesBlocked": read_setting_bool(&connection, "external_images_blocked", true)?,
+        "bodyDisplayMode": read_setting_string(&connection, "body_display_mode", "text")?,
         "locale": read_setting_string(&connection, "locale", "zh-CN")?
     }))
 }
@@ -24,6 +25,12 @@ pub fn settings_update(state: State<'_, AppState>, input: Value) -> Result<Value
     let current = settings_get(state.clone())?;
     let current_object = require_object(&current)?;
     let input_object = require_object(&input)?;
+    let body_display_mode = optional_string(input_object, "bodyDisplayMode")
+        .or_else(|| optional_string(current_object, "bodyDisplayMode"))
+        .unwrap_or_else(|| "text".to_string());
+    if !matches!(body_display_mode.as_str(), "text" | "html") {
+        return Err("正文显示方式无效。".to_string());
+    }
     let connection = db::open(&state)?;
 
     write_setting(
@@ -74,6 +81,7 @@ pub fn settings_update(state: State<'_, AppState>, input: Value) -> Result<Value
         .or_else(|| optional_string(current_object, "locale"))
         .unwrap_or_else(|| "zh-CN".to_string());
     write_setting(&connection, "locale", &locale, "string")?;
+    write_setting(&connection, "body_display_mode", &body_display_mode, "string")?;
     settings_get(state)
 }
 
@@ -140,6 +148,7 @@ fn ensure_default_settings(connection: &Connection) -> Result<(), String> {
         ("sync_window_days", "90", "number"),
         ("open_at_login", "0", "boolean"),
         ("external_images_blocked", "1", "boolean"),
+        ("body_display_mode", "text", "string"),
         ("locale", "zh-CN", "string"),
     ] {
         connection

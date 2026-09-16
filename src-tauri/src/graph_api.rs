@@ -171,7 +171,7 @@ fn parse_message(value: &Value) -> Result<FetchedMessage, ApiError> {
         ));
     }
     let from = value.get("from").and_then(|from| from.get("emailAddress"));
-    Ok(fetched_message(
+    let mut message = fetched_message(
         stable_uid(id),
         value
             .get("subject")
@@ -215,7 +215,27 @@ fn parse_message(value: &Value) -> Result<FetchedMessage, ApiError> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         false,
-    ))
+    );
+    for (field, kind) in [("from", "from"), ("sender", "sender"),
+        ("toRecipients", "to"), ("ccRecipients", "cc"), ("bccRecipients", "bcc"),
+        ("replyTo", "reply_to")] {
+        // Delta updates can omit unchanged fields; preserve those stored participants.
+        if let Some(value) = value.get(field) {
+            let values: Vec<&Value> = match value.as_array() {
+                Some(values) => values.iter().collect(),
+                None => vec![value],
+            };
+            let addresses = values.into_iter().filter_map(|recipient| {
+                let address = recipient.get("emailAddress")?;
+                let email = address.get("address")?.as_str()?.trim().to_string();
+                if email.is_empty() { return None; }
+                let name = address.get("name").and_then(Value::as_str).map(str::to_string);
+                Some((name, email))
+            }).collect();
+            message.participants.push(crate::mail_body::ParticipantHeader { kind, addresses });
+        }
+    }
+    Ok(message)
 }
 
 async fn get_json(request: reqwest::RequestBuilder) -> Result<Value, ApiError> {

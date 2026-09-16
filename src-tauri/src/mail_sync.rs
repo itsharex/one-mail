@@ -5,6 +5,8 @@ mod graph_api;
 
 use async_imap::types::{Flag, Mailbox};
 use futures_util::TryStreamExt;
+use futures_util::{stream, StreamExt};
+use std::future::Future;
 use mailparse::MailHeaderMap;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -12,9 +14,10 @@ use serde_json::{json, Value};
 use crate::{db, mail_transport, state::AppState};
 
 const MAX_MESSAGES: usize = 200;
+const SYNC_CONCURRENCY: usize = 4;
 const IMAP_SUMMARY_QUERY: &str = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER])";
 
-pub async fn sync_all(state: &AppState, mode: Option<&str>) -> Result<Value, String> {
+pub async fn sync_all(state: &AppState, mode: Option<&str>, on_complete: impl Fn(&Value, usize, usize)) -> Result<Value, String> {
     let accounts = {
         let connection = db::open(state)?;
         let mut statement = connection
@@ -44,18 +47,31 @@ pub async fn sync_all(state: &AppState, mode: Option<&str>) -> Result<Value, Str
         accounts
     };
 
-    let mut results = Vec::with_capacity(accounts.len());
-    for account in accounts {
+    let tasks = accounts.into_iter().map(|account| async move {
         if let Some(error) = sync_skip_reason(&account) {
-            results.push(account_sync_skipped(&account, error));
-            continue;
+            return account_sync_skipped(&account, error);
         }
-        results.push(match sync_account(state, account.account_id, mode).await {
+        match sync_account(state, account.account_id, mode).await {
             Ok(value) => value,
             Err(error) => json!({ "accountId": account.account_id, "ok": false, "error": error }),
-        });
-    }
+        }
+    }).collect();
+    let results = run_sync_tasks(tasks, on_complete).await;
     Ok(json!({ "mode": mode, "accounts": results }))
+}
+
+async fn run_sync_tasks<F: Future<Output = Value>>(tasks: Vec<F>, on_complete: impl Fn(&Value, usize, usize)) -> Vec<Value> {
+    let total = tasks.len();
+    let mut pending = stream::iter(tasks.into_iter().enumerate().map(|(index, task)| async move {
+        (index, task.await)
+    })).buffer_unordered(SYNC_CONCURRENCY);
+    let mut results = Vec::with_capacity(total);
+    while let Some((index, result)) = pending.next().await {
+        on_complete(&result, results.len() + 1, total);
+        results.push((index, result));
+    }
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
 }
 
 #[derive(Clone, Debug)]
@@ -332,6 +348,7 @@ async fn sync_imap_folder(
             let (from_name, from_email) = crate::mail_body::first_header_address(&headers, "From");
             let internal_date = fetch.internal_date().map(|date| date.to_rfc3339());
             fetched.push(FetchedMessage {
+                participants: crate::mail_body::parse_participant_headers(&headers),
                 uid: i64::from(uid),
                 subject: headers.get_first_value("Subject"),
                 message_id: headers.get_first_value("Message-ID"),
@@ -459,6 +476,7 @@ fn set_folder_sync_error(
 }
 
 pub(crate) struct FetchedMessage {
+    pub(crate) participants: Vec<crate::mail_body::ParticipantHeader>,
     pub(crate) uid: i64,
     subject: Option<String>,
     message_id: Option<String>,
@@ -492,6 +510,7 @@ pub(crate) fn fetched_message(
     remote_deleted: bool,
 ) -> FetchedMessage {
     FetchedMessage {
+        participants: Vec::new(),
         uid,
         subject,
         message_id,
@@ -537,6 +556,8 @@ pub(crate) fn apply_messages(
     cursor: Option<&str>,
     sync_path: &str,
 ) -> Result<Value, String> {
+    let transaction = rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| format!("开始保存同步批次失败：{error}"))?;
     let mut inserted_count = 0;
     let mut new_messages = Vec::new();
     for message in messages {
@@ -585,6 +606,8 @@ pub(crate) fn apply_messages(
             [folder_id],
         )
         .map_err(|error| format!("更新文件夹同步状态失败：{error}"))?;
+
+    transaction.commit().map_err(|error| format!("提交同步批次失败：{error}"))?;
 
     Ok(json!({
         "accountId": account_id,
@@ -656,9 +679,9 @@ fn upsert_message(
             ],
         )
         .map_err(|error| format!("保存邮件摘要失败：{error}"))?;
-    Ok(existing_message_id
-        .is_none()
-        .then(|| connection.last_insert_rowid()))
+    let message_id = existing_message_id.unwrap_or_else(|| connection.last_insert_rowid());
+    crate::mail_body::persist_participants(connection, message_id, &message.participants)?;
+    Ok(existing_message_id.is_none().then_some(message_id))
 }
 
 fn ensure_inbox(connection: &Connection, account_id: i64) -> Result<i64, String> {
@@ -697,6 +720,59 @@ mod tests {
         IMAP_SUMMARY_QUERY,
     };
     use rusqlite::Connection;
+
+    #[tokio::test]
+    async fn sync_batch_is_bounded_and_reports_fast_accounts_before_slow_ones() {
+        use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
+        use std::time::Duration;
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(super::SYNC_CONCURRENCY));
+        let progress = Mutex::new(Vec::new());
+        let tasks = (0..8).map(|id| {
+            let (active, peak, barrier) = (active.clone(), peak.clone(), barrier.clone());
+            async move {
+                let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(count, Ordering::SeqCst);
+                if id < super::SYNC_CONCURRENCY { barrier.wait().await; }
+                tokio::time::sleep(Duration::from_millis(if id == 0 { 50 } else { 1 })).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                serde_json::json!({"accountId":id,"ok":id != 2})
+            }
+        }).collect();
+        let results = tokio::time::timeout(Duration::from_secs(2), super::run_sync_tasks(tasks, |result, completed, total| {
+            progress.lock().unwrap().push((result["accountId"].as_u64().unwrap(), completed, total));
+        })).await.expect("batch must not run serially or hang");
+        assert_eq!(peak.load(Ordering::SeqCst), super::SYNC_CONCURRENCY);
+        assert_eq!(results.len(), 8);
+        assert_eq!(results[2]["ok"], false);
+        for (id, result) in results.iter().enumerate() { assert_eq!(result["accountId"], id); }
+        let progress = progress.lock().unwrap();
+        assert_ne!(progress[0].0, 0);
+        for (index, (_, completed, total)) in progress.iter().enumerate() {
+            assert_eq!((*completed, *total), (index + 1, 8));
+        }
+    }
+
+    #[test]
+    fn sync_batch_commits_messages_and_cursor_together_or_rolls_back() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(include_str!("db/schema.sql")).unwrap();
+        connection.execute_batch(
+            "INSERT INTO onemail_provider_presets (provider_key,display_name,auth_type) VALUES ('test','Test','manual');
+             INSERT INTO onemail_mail_accounts (account_id,provider_key,email,normalized_email,account_label,auth_type,imap_host,imap_port,imap_security)
+             VALUES (1,'test','me@example.test','me@example.test','Test','manual','localhost',993,'ssl_tls');
+             INSERT INTO onemail_mail_folders (folder_id,account_id,path,name,role) VALUES (1,1,'INBOX','Inbox','inbox');"
+        ).unwrap();
+        let message = |uid| fetched_message(uid, Some("Test".into()), None, None, None, None, None, None, None, None, 0, false, false, false);
+        assert!(super::apply_messages(&connection, 1, 1, "INBOX", &[message(1), message(0)], Some("test:failed"), "imap").is_err());
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM onemail_mail_messages", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM onemail_folder_sync_states", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        let result = super::apply_messages(&connection, 1, 1, "INBOX", &[message(1), message(2)], Some("test:success"), "imap").unwrap();
+        assert_eq!(result["insertedCount"], 2);
+        assert_eq!(super::read_cursor(&connection, 1, "test:").unwrap().as_deref(), Some("success"));
+        assert_eq!(connection.query_row("SELECT total_count FROM onemail_mail_folders WHERE folder_id=1", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+    }
 
     #[test]
     fn only_resets_a_folder_when_known_uid_validity_changes() {

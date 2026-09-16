@@ -1,5 +1,6 @@
 import type { AppSettings, AppUpdateStatus, SystemInfo } from '@renderer/shared/types'
 import {
+  AlertCircle,
   ChevronDown,
   CloudDownload,
   FileUp,
@@ -8,7 +9,8 @@ import {
   Plus,
   RotateCcw,
   Settings,
-  Upload
+  Upload,
+  X
 } from 'lucide-react'
 
 import type { BackupImportDialogSource } from '@renderer/components/backup/backup-import-dialog'
@@ -206,6 +208,9 @@ export function StatusBar({
   accountCount,
   messageCount,
   syncNotice,
+  error,
+  syncErrors = [],
+  onDismissError,
   updateStatus,
   onOpenVersion,
   onInstallUpdate
@@ -215,6 +220,9 @@ export function StatusBar({
   accountCount: number
   messageCount: number
   syncNotice: SyncNotice
+  error?: string | null
+  syncErrors?: string[]
+  onDismissError?: () => void
   updateStatus: AppUpdateStatus | null
   onOpenVersion: () => void
   onInstallUpdate: () => void
@@ -232,14 +240,26 @@ export function StatusBar({
         : t('status.openRepository')
 
   return (
+    <>
+    {(error || syncErrors.length > 0) && <section role="alert" className="shrink-0 border-t border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+      <div className="mb-1 flex items-center gap-1.5 font-medium">
+        <AlertCircle className="size-3.5" aria-hidden="true" />
+        <span className="flex-1">{t('mailbox.errorDetails')}</span>
+        {onDismissError && <Button variant="ghost" size="icon-sm" className="size-5 text-destructive" onClick={onDismissError} aria-label={t('common.close')}><X className="size-3.5" /></Button>}
+      </div>
+      <div className="max-h-32 select-text overflow-y-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+        {error && <p>{error}</p>}
+        {syncErrors.length > 0 && <ul className="space-y-1">{syncErrors.map((message, index) => <li key={index}>{message}</li>)}</ul>}
+      </div>
+    </section>}
     <footer className="app-drag-region native-statusbar flex h-7 shrink-0 items-center justify-end border-t px-2 text-[11px] text-muted-foreground">
       <div className="app-no-drag flex min-w-0 items-center justify-end gap-1.5 overflow-hidden">
         {syncText ? (
           <span
-            className="flex min-w-0 items-center gap-1 truncate text-foreground"
+            className={cn('flex min-w-0 items-center gap-1 truncate', syncNotice.state === 'error' ? 'text-destructive' : 'text-foreground')}
             title={syncText}
           >
-            <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+            <span className={cn('size-1.5 shrink-0 rounded-full', syncNotice.state === 'error' ? 'bg-destructive' : 'bg-primary')} aria-hidden="true" />
             {syncText}
           </span>
         ) : null}
@@ -285,6 +305,7 @@ export function StatusBar({
         </button>
       </div>
     </footer>
+    </>
   )
 }
 

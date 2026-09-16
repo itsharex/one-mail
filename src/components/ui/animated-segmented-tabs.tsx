@@ -104,7 +104,7 @@ export function AnimatedSegmentedTabs<TValue extends string = string>({
     const list = listRef.current
     if (!list) return
 
-    const observer = new ResizeObserver(() => moveHighlight(valueRef.current, false))
+    const observer = new ResizeObserver(() => moveHighlight(valueRef.current, true))
     observer.observe(list)
     triggerRefs.current.forEach((trigger) => observer.observe(trigger))
 

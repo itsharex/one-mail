@@ -12,6 +12,7 @@ import {
   ExternalLink,
   FileUp,
   FolderOpen,
+  FileText,
   KeyRound,
   Languages,
   Power,
@@ -109,6 +110,7 @@ type BackupMessage = {
 const AUTO_SAVE_DELAY_MS = 350
 
 type SettingsFormValues = {
+  bodyDisplayMode: 'text' | 'html'
   syncIntervalMinutes: number
   syncWindowDays: number
   openAtLogin: boolean
@@ -208,6 +210,7 @@ export function SettingsDialog({
             syncWindowDays: currentValues.syncWindowDays,
             openAtLogin: currentValues.openAtLogin,
             externalImagesBlocked: currentValues.externalImagesBlocked,
+            bodyDisplayMode: currentValues.bodyDisplayMode,
             locale: currentValues.locale
           })
           lastSavedValuesRef.current = currentValues
@@ -910,6 +913,29 @@ function GeneralSettingsForm({
         <FieldGroup className={SETTINGS_LIST_CLASS}>
           <Controller
             control={form.control}
+            name="bodyDisplayMode"
+            render={({ field }) => (
+              <SettingRow
+                icon={FileText}
+                iconClassName="bg-emerald-500"
+                title={t('settings.bodyDisplay.title')}
+                description={t('settings.bodyDisplay.description')}
+                control={
+                  <Select value={field.value} onValueChange={field.onChange}>
+                    <SelectTrigger size="sm" className="w-32" aria-label={t('settings.bodyDisplay.title')}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="text">{t('settings.bodyDisplay.text')}</SelectItem>
+                      <SelectItem value="html">{t('settings.bodyDisplay.html')}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                }
+              />
+            )}
+          />
+          <Controller
+            control={form.control}
             name="externalImagesBlocked"
             render={({ field }) => (
               <SettingRow
@@ -920,9 +946,10 @@ function GeneralSettingsForm({
                 control={
                   <Switch
                     id="external-images-blocked"
+                    aria-label={t('settings.externalContent.title')}
                     size="sm"
-                    checked={field.value}
-                    onCheckedChange={field.onChange}
+                    checked={!field.value}
+                    onCheckedChange={(checked) => field.onChange(!checked)}
                   />
                 }
               />
@@ -1366,6 +1393,7 @@ function createSettingsSchema(t: (key: TranslationKey) => string) {
       .max(3650, t('settings.syncWindow.errorMax')),
     openAtLogin: z.boolean(),
     externalImagesBlocked: z.boolean(),
+    bodyDisplayMode: z.enum(['text', 'html']),
     locale: z.enum(['zh-CN', 'en-US'])
   })
 }
@@ -1376,6 +1404,7 @@ function toFormValues(settings: AppSettings | null): SettingsFormValues {
     syncWindowDays: settings?.syncWindowDays ?? 90,
     openAtLogin: settings?.openAtLogin === true,
     externalImagesBlocked: settings?.externalImagesBlocked !== false,
+    bodyDisplayMode: settings?.bodyDisplayMode === 'html' ? 'html' : 'text',
     locale: settings?.locale === 'en-US' ? 'en-US' : 'zh-CN'
   }
 }
@@ -1386,6 +1415,7 @@ function areSettingsEqual(first: SettingsFormValues, second: SettingsFormValues)
     first.syncWindowDays === second.syncWindowDays &&
     first.openAtLogin === second.openAtLogin &&
     first.externalImagesBlocked === second.externalImagesBlocked &&
+    first.bodyDisplayMode === second.bodyDisplayMode &&
     first.locale === second.locale
   )
 }

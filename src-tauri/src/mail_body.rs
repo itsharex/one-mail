@@ -13,6 +13,7 @@ use crate::{
 
 #[derive(Default)]
 struct ParsedMessageBody {
+    raw_headers: String,
     headers: ParsedMessageHeaders,
     text: Option<String>,
     html: Option<String>,
@@ -28,6 +29,7 @@ struct ParsedMessageHeaders {
     received_at: Option<String>,
     in_reply_to: Option<String>,
     references_header: Option<String>,
+    participants: Vec<ParticipantHeader>,
 }
 
 struct ParsedAttachment {
@@ -172,6 +174,7 @@ fn parse_message(raw_message: &[u8]) -> Result<ParsedMessageBody, String> {
         .collect();
 
     Ok(ParsedMessageBody {
+        raw_headers: parsed.headers.iter().map(|header| format!("{}: {}\r\n", header.get_key(), header.get_value())).collect(),
         headers,
         text,
         html,
@@ -190,7 +193,104 @@ fn parse_message_headers(headers: &[MailHeader<'_>]) -> ParsedMessageHeaders {
         received_at: non_empty_header(headers, "Date"),
         in_reply_to: non_empty_header(headers, "In-Reply-To"),
         references_header: non_empty_header(headers, "References"),
+        participants: parse_participant_headers(headers),
     }
+}
+
+pub(crate) struct ParticipantHeader {
+    pub(crate) kind: &'static str,
+    pub(crate) addresses: Vec<(Option<String>, String)>,
+}
+
+pub(crate) fn parse_participant_headers(headers: &[MailHeader<'_>]) -> Vec<ParticipantHeader> {
+    [("From", "from"), ("Sender", "sender"), ("To", "to"), ("Cc", "cc"),
+     ("Bcc", "bcc"), ("Reply-To", "reply_to")]
+        .into_iter()
+        .map(|(name, kind)| {
+            let mut addresses = Vec::new();
+            for header in headers.get_all_headers(name) {
+                if let Ok(parsed) = addrparse_header(header) {
+                    for address in parsed.iter() {
+                        let singles = match address {
+                            MailAddr::Single(single) => std::slice::from_ref(single),
+                            MailAddr::Group(group) => group.addrs.as_slice(),
+                        };
+                        for single in singles {
+                            let email = single.addr.trim().replace('\0', "");
+                            if !email.is_empty() {
+                                addresses.push((single.display_name.clone(), email));
+                            }
+                        }
+                    }
+                }
+            }
+            ParticipantHeader { kind, addresses }
+        })
+        .collect()
+}
+
+pub(crate) fn participants_need_repair(
+    connection: &rusqlite::Connection,
+    message_id: i64,
+) -> Result<bool, String> {
+    let stored = connection.query_row(
+        "SELECT raw_headers,EXISTS(SELECT 1 FROM onemail_message_addresses a
+           WHERE a.message_id=m.message_id AND a.kind='from')
+         FROM onemail_mail_messages m WHERE m.message_id=?1",
+        [message_id],
+        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, bool>(1)?)),
+    ).optional().map_err(|error| format!("读取邮件参与者状态失败：{error}"))?;
+    let Some((raw_headers, has_from)) = stored else { return Ok(false); };
+    if has_from { return Ok(false); }
+    if let Some(raw_headers) = raw_headers {
+        if let Ok((headers, _)) = mailparse::parse_headers(raw_headers.as_bytes()) {
+            persist_participants(connection, message_id, &parse_participant_headers(&headers))?;
+            // A successfully parsed header cache also covers messages with no address headers.
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) fn persist_participants(
+    connection: &rusqlite::Connection,
+    message_id: i64,
+    participants: &[ParticipantHeader],
+) -> Result<(), String> {
+    if participants.is_empty() {
+        return Ok(());
+    }
+    connection.execute_batch("SAVEPOINT message_participants")
+        .map_err(|error| format!("开始保存邮件参与者失败：{error}"))?;
+    let result = (|| -> rusqlite::Result<()> {
+        for header in participants {
+            connection.execute(
+                "DELETE FROM onemail_message_addresses WHERE message_id=?1 AND kind=?2",
+                params![message_id, header.kind],
+            )?;
+            let mut seen = std::collections::HashSet::new();
+            for (name, email) in &header.addresses {
+                let email = email.trim();
+                let normalized = email.to_lowercase();
+                if normalized.is_empty() || !seen.insert(normalized.clone()) {
+                    continue;
+                }
+                connection.execute(
+                    "INSERT INTO onemail_message_addresses
+                       (message_id,kind,name,email,normalized_email,sort_order)
+                     VALUES (?1,?2,?3,?4,?5,?6)",
+                    params![message_id, header.kind, name, email, normalized, seen.len() as i64 - 1],
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = connection.execute_batch("ROLLBACK TO message_participants; RELEASE message_participants");
+        return Err(format!("保存邮件参与者失败：{error}"));
+    }
+    connection.execute_batch("RELEASE message_participants")
+        .map_err(|error| format!("提交邮件参与者失败：{error}"))
 }
 
 pub(crate) fn first_header_address(
@@ -353,6 +453,11 @@ fn persist_message_body(
         .map_err(|error| format!("更新正文状态失败：{error}"))?;
 
     persist_message_headers(&connection, message_id, &parsed.headers, snippet.as_deref())?;
+    persist_participants(&connection, message_id, &parsed.headers.participants)?;
+    connection.execute(
+        "UPDATE onemail_mail_messages SET raw_headers=?2 WHERE message_id=?1",
+        params![message_id, parsed.raw_headers],
+    ).map_err(|error| format!("保存原始邮件头失败：{error}"))?;
     update_search_index(&connection, message_id, account_id, &search_text)?;
 
     Ok(json!({

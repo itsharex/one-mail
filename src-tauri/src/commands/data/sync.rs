@@ -14,8 +14,14 @@ pub async fn sync_start_all(
     state: State<'_, AppState>,
     mode: Option<String>,
 ) -> Result<Value, String> {
-    let result = mail_sync::sync_all(&state, mode.as_deref()).await?;
-    emit_sync_events(&app, &result, mode.as_deref());
+    let result = mail_sync::sync_all(&state, mode.as_deref(), |result, completed, total| {
+        emit_sync_events(&app, result, mode.as_deref());
+        let _ = app.emit("sync/progress", json!({
+            "accountId": result["accountId"], "completed": completed, "total": total,
+            "ok": result["ok"], "skipped": result.get("skipped").and_then(Value::as_bool).unwrap_or(false),
+            "error": result.get("error").and_then(Value::as_str)
+        }));
+    }).await?;
     Ok(result)
 }
 

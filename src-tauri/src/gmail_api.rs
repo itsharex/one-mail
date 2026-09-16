@@ -251,6 +251,11 @@ async fn get_message(
         ("format", "metadata"),
         ("metadataHeaders", "Subject"),
         ("metadataHeaders", "From"),
+        ("metadataHeaders", "Sender"),
+        ("metadataHeaders", "To"),
+        ("metadataHeaders", "Cc"),
+        ("metadataHeaders", "Bcc"),
+        ("metadataHeaders", "Reply-To"),
         ("metadataHeaders", "Date"),
         ("metadataHeaders", "Message-ID"),
         ("metadataHeaders", "In-Reply-To"),
@@ -308,7 +313,7 @@ async fn get_message(
         })
     };
     let (from_name, from_email) = parse_from(header("From").as_deref());
-    Ok(Some(fetched_message(
+    let mut message = fetched_message(
         stable_uid(id),
         header("Subject"),
         header("Message-ID"),
@@ -333,7 +338,18 @@ async fn get_message(
         !labels.contains("UNREAD"),
         has_attachments(payload.get("payload")),
         false,
-    )))
+    );
+    if let Some(headers) = headers {
+        let raw_headers = headers.iter().filter_map(|item| {
+            let name = item.get("name")?.as_str()?;
+            let value = item.get("value")?.as_str()?;
+            Some(format!("{}: {}\r\n", name, value.replace(['\r', '\n'], " ")))
+        }).collect::<String>();
+        let (parsed, _) = mailparse::parse_headers(raw_headers.as_bytes())
+            .map_err(|error| ApiError::other(format!("解析 Gmail 邮件参与者失败：{error}")))?;
+        message.participants = crate::mail_body::parse_participant_headers(&parsed);
+    }
+    Ok(Some(message))
 }
 
 async fn get_json(request: reqwest::RequestBuilder) -> Result<Value, ApiError> {
