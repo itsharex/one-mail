@@ -23,19 +23,20 @@ export type SyncAllRunResult = {
   accounts: AccountSyncRunItem[]
 }
 
-export type AccountSyncRunResult = SyncStatus & {
-  accountId: number
-  scannedCount: number
-  insertedCount: number
-  updatedCount: number
+export type AccountSyncRunResult = AccountSyncRunItem & {
+  scannedCount?: number
+  insertedCount?: number
+  updatedCount?: number
 }
 
 export type SyncProgressEvent = {
   accountId: number
-  completed: number
-  total: number
-  ok: boolean
-  skipped: boolean
+  completed?: number
+  total?: number
+  ok?: boolean
+  skipped?: boolean
+  stage?: 'connecting' | 'requesting' | 'folder' | 'fetching' | 'saving'
+  folder?: string | null
   error?: string | null
 }
 

@@ -9,7 +9,8 @@ use std::{
 };
 
 use rand::RngCore;
-use sync_tracking::SyncTracker;
+pub(crate) use sync_tracking::{wait_for_batch, BatchStart, SYNC_CONCURRENCY};
+use sync_tracking::{SyncBatchTracker, SyncTracker};
 use tauri::{AppHandle, Manager};
 
 const DATABASE_KEY_PREFIX: &str = "ONEMAIL_DATABASE_KEY=";
@@ -22,6 +23,7 @@ pub struct AppState {
     ai_operation_lock: tokio::sync::Mutex<()>,
     oauth_refresh_locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     pub sync_tracker: SyncTracker,
+    pub sync_batch_tracker: SyncBatchTracker,
 }
 
 impl AppState {
@@ -46,6 +48,7 @@ impl AppState {
             ai_operation_lock: tokio::sync::Mutex::new(()),
             oauth_refresh_locks: Mutex::new(HashMap::new()),
             sync_tracker: SyncTracker::default(),
+            sync_batch_tracker: SyncBatchTracker::default(),
         })
     }
 

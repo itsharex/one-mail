@@ -123,6 +123,9 @@ pub async fn connect_authenticated(
                 oauth::set_connection_state(state, account.account_id, "connected", false, None);
             Ok(session)
         }
+        Err(first_error) if is_outlook_mailbox_access_error(account, &first_error) => {
+            Err(outlook_mailbox_access_error(state, account, &first_error))
+        }
         Err(first_error) if is_xoauth2_auth_error(&first_error) => {
             let refreshed = oauth::force_refresh_access_token(
                 state,
@@ -144,6 +147,9 @@ pub async fn connect_authenticated(
                     Ok(session)
                 }
                 Err(second_error) => {
+                    if is_outlook_mailbox_access_error(account, &second_error) {
+                        return Err(outlook_mailbox_access_error(state, account, &second_error));
+                    }
                     let message = format!("IMAP OAuth 登录认证失败，请重新授权：{second_error}");
                     let _ = oauth::set_connection_state(
                         state,
@@ -368,11 +374,29 @@ fn imap_client_identification() -> [(&'static str, Option<&'static str>); 4] {
 }
 
 fn is_xoauth2_auth_error(error: &str) -> bool {
+    if is_authenticated_but_not_connected(error) {
+        return false;
+    }
     let message = error.to_ascii_lowercase();
     message.contains("auth")
         || message.contains("oauth")
         || message.contains("invalid credentials")
         || message.contains("not authenticated")
+}
+
+fn is_authenticated_but_not_connected(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("authenticated but not connected")
+}
+
+fn is_outlook_mailbox_access_error(account: &MailAccount, error: &str) -> bool {
+    matches!(account.provider_key.to_ascii_lowercase().as_str(), "outlook" | "microsoft")
+        && is_authenticated_but_not_connected(error)
+}
+
+fn outlook_mailbox_access_error(state: &AppState, account: &MailAccount, error: &str) -> String {
+    let message = format!("Outlook IMAP 连接被拒绝：{error}");
+    let _ = oauth::set_connection_state(state, account.account_id, "connected", false, Some(&message));
+    message
 }
 
 pub fn password(state: &AppState, account: &MailAccount) -> Result<String, String> {
@@ -444,8 +468,15 @@ impl Authenticator for XOAuth2<'_> {
 mod tests {
     use super::{
         decode_modified_utf7, folder_role, imap_client_identification, is_folder_selectable,
+        is_xoauth2_auth_error,
         IMAP_CLIENT_NAME, IMAP_CLIENT_SUPPORT_URL, IMAP_CLIENT_VENDOR,
     };
+
+    #[test]
+    fn authenticated_but_not_connected_is_not_a_token_error() {
+        assert!(!is_xoauth2_auth_error("AUTHENTICATE failed: User is authenticated but not connected"));
+        assert!(is_xoauth2_auth_error("AUTHENTICATE failed: invalid credentials"));
+    }
 
     #[test]
     fn decodes_modified_utf7_mailbox_names_and_literal_ampersands() {

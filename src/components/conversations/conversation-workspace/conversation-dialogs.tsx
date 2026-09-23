@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import type { Account } from '@renderer/components/mail/types';
 import type { ConversationMessage, ConversationSummary } from '@renderer/shared/conversations';
 import type { ComposeDraft } from '@renderer/lib/api';
+import { ConversationAvatar } from './conversation-avatar';
 
 type ConversationDialogsProps = {
   participantsOpen: boolean;
@@ -62,29 +63,24 @@ export function ConversationDialogs({
         open={participantsOpen}
         onOpenChange={setParticipantsOpen}
         title={text("参与者", "Participants")}
-        contentClassName="flex max-h-[85dvh] flex-col gap-0 overflow-hidden p-0 md:max-w-md"
-        headerClassName="shrink-0 px-4 py-3 pr-12 text-left"
-        bodyClassName="min-h-0 overflow-y-auto px-4 py-2"
-        footerClassName="shrink-0 border-t px-4 py-2"
-        footer={
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setParticipantsOpen(false)}
-          >
-            {text("关闭", "Close")}
-          </Button>
-        }
+        contentClassName="flex max-h-[85dvh] flex-col gap-0 overflow-hidden p-0 md:max-w-sm"
+        headerClassName="shrink-0 border-b px-4 py-4 pr-12 text-left"
+        bodyClassName="min-h-0 overflow-y-auto px-4 py-1"
       >
         <ul className="divide-y">
           {conversation.participants.map((participant) => (
-            <li key={participant.email} className="min-w-0 py-2 text-sm">
-              {participant.name && (
-                <p className="font-medium break-words">{participant.name}</p>
-              )}
-              <p className="text-muted-foreground break-all">
-                {participant.email}
-              </p>
+            <li key={participant.email} className="flex min-w-0 items-center gap-3 py-3 text-sm">
+              <ConversationAvatar seed={participant.email} compact />
+              <div className="min-w-0">
+                <p className="truncate font-medium" title={participant.name || participant.email}>
+                  {participant.name || participant.email}
+                </p>
+                {participant.name && (
+                  <p className="truncate text-xs text-muted-foreground" title={participant.email}>
+                    {participant.email}
+                  </p>
+                )}
+              </div>
             </li>
           ))}
         </ul>

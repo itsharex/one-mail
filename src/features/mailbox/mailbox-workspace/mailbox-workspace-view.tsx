@@ -1,15 +1,16 @@
 import * as React from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { toast } from 'sonner'
+import type { ConversationMessage } from '@renderer/shared/conversations'
 import { ConversationWorkspace } from '@renderer/components/conversations/conversation-workspace'
 import { AccountList } from '@renderer/components/account/account-list'
 import { AiAssistant } from '@renderer/components/ai/ai-assistant'
 import { AccountWarningDialog } from '@renderer/components/account/account-warning-dialog'
 import { EditAccountDialog } from '@renderer/components/account/edit-account-dialog'
-import { OutlookImapHelpDialog } from '@renderer/components/account/outlook-imap-help-dialog'
 import { RemoveAccountDialog } from '@renderer/components/account/remove-account-dialog'
 import { MailComposer } from '@renderer/components/mail/mail-composer'
 import { OutboxPanel } from '@renderer/components/mail/outbox-panel'
 import { BackupImportDialog } from '@renderer/components/backup/backup-import-dialog'
-import { SettingsDialog } from '@renderer/components/settings/settings-dialog'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@renderer/components/ui/resizable'
 import { installAppUpdate, openExternalUrl } from '@renderer/pages/mailbox/api'
 import { ONEMAIL_HOMEPAGE_URL, hasAvailableUpdate } from '@renderer/lib/update-status'
@@ -17,11 +18,12 @@ import { NoAccountsBody, StatusBar, TitleBar } from '../mailbox-chrome'
 import { useMailboxWorkspaceController } from './use-mailbox-workspace-controller'
 
 export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMailboxWorkspaceController> }): React.JSX.Element {
+  const [aiOpenRequest, setAiOpenRequest] = React.useState<{ messageId: number; subject: string; token: number } | undefined>()
   const {
+    loading,
     showNoAccounts,
     systemInfo,
     handleOpenAddAccountWindow,
-    setSettingsInitialSection,
     setDialogKind,
     backupImportBusy,
     handleImportBackup,
@@ -43,9 +45,6 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
     setOutboxOpen,
     syncNotice,
     error,
-    syncFailures,
-    setError,
-    setSyncFailures,
     updateStatus,
     dialogAccount,
     dialogKind,
@@ -55,11 +54,6 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
     warningAccount,
     warningAccountId,
     aiSettings,
-    settingsInitialSection,
-    handleUpdateSettings,
-    handleVerifyAiSettings,
-    handleClearAiSettings,
-    reloadAfterBackupImport,
     composerOpen,
     handleAiChat,
     backupImportDialogOpen,
@@ -67,8 +61,6 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
     setBackupImportDialogOpen,
     setBackupImportBusy,
     handleBackupImported,
-    outlookImapHelpAccount,
-    setOutlookImapHelpAccount,
     composerDraft,
     composerPending,
     closeComposer,
@@ -83,6 +75,9 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
     handleRetryOutbox,
     handleDeleteOutbox,
   } = model
+  const openSettings = (section: 'general' | 'about' = 'general'): void => {
+    void invoke('settings_open_window', { section }).catch((reason) => toast.error(String(reason)))
+  }
   return (
     <main data-workspace="conversations" className="native-window flex h-screen min-h-screen flex-col overflow-hidden text-foreground">
       {showNoAccounts ? (
@@ -91,10 +86,7 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
             <TitleBar
               platform={systemInfo?.platform}
               onAddAccount={handleOpenAddAccountWindow}
-              onOpenSettings={() => {
-                setSettingsInitialSection('general')
-                setDialogKind('settings')
-              }}
+              onOpenSettings={() => openSettings()}
             />
           </div>
           <NoAccountsBody
@@ -122,10 +114,7 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
               <TitleBar
                 platform={systemInfo?.platform}
                 onAddAccount={handleOpenAddAccountWindow}
-                onOpenSettings={() => {
-                  setSettingsInitialSection('general')
-                  setDialogKind('settings')
-                }}
+                onOpenSettings={() => openSettings()}
               />
               <AccountList
                 accounts={accounts}
@@ -163,34 +152,35 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
                 refreshKey={aiSessionEpoch}
                 onCompose={() => { void openComposer('new') }}
                 onOpenOutbox={() => setOutboxOpen(true)}
-              />
-              <StatusBar
-                systemInfo={systemInfo}
-                settings={settings}
-                accountCount={realAccounts.length}
-                messageCount={selectedAccount.messageCount ?? 0}
-                syncNotice={syncNotice}
-                error={error}
-                syncErrors={syncFailures.map((failure) => {
-                  const account = accounts.find((item) => item.accountId === failure.accountId)
-                  return `${account?.address || account?.name || `#${failure.accountId}`}：${failure.error}`
-                })}
-                onDismissError={() => { setError(null); setSyncFailures([]) }}
-                updateStatus={updateStatus}
-                onOpenVersion={() => {
-                  if (hasAvailableUpdate(updateStatus)) {
-                    void openExternalUrl(ONEMAIL_HOMEPAGE_URL)
-                    return
-                  }
-                  setSettingsInitialSection('about')
-                  setDialogKind('settings')
-                }}
-                onInstallUpdate={() => { void installAppUpdate() }}
+                onAskAi={aiSettings?.verified ? (message: ConversationMessage) => {
+                  if (message.messageId) setAiOpenRequest((previous) => ({ messageId: message.messageId!, subject: message.subject || '', token: (previous?.token ?? 0) + 1 }))
+                } : undefined}
               />
             </div>
           </ResizablePanel>
         </ResizablePanelGroup>
       )}
+
+      <StatusBar
+        loading={loading}
+        selectedAccount={selectedAccount}
+        accountAddresses={realAccounts.map((account) => account.address)}
+        systemInfo={systemInfo}
+        settings={settings}
+        accountCount={realAccounts.length}
+        messageCount={selectedAccount.messageCount ?? 0}
+        syncNotice={syncNotice}
+        error={error}
+        updateStatus={updateStatus}
+        onOpenVersion={() => {
+          if (hasAvailableUpdate(updateStatus)) {
+            void openExternalUrl(ONEMAIL_HOMEPAGE_URL)
+            return
+          }
+          openSettings('about')
+        }}
+        onInstallUpdate={() => { void installAppUpdate() }}
+      />
 
       <EditAccountDialog
         account={dialogAccount ?? selectedAccount}
@@ -233,25 +223,15 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
           onReauthorize={handleReauthorizeAccount}
         />
       ) : null}
-      <SettingsDialog
-        open={dialogKind === 'settings'}
-        settings={settings}
-        systemInfo={systemInfo}
-        updateStatus={updateStatus}
-        aiSettings={aiSettings}
-        initialSection={settingsInitialSection}
-        onOpenChange={(open) => setDialogKind(open ? 'settings' : null)}
-        onSubmit={handleUpdateSettings}
-        onVerifyAi={handleVerifyAiSettings}
-        onClearAi={handleClearAiSettings}
-        onImported={reloadAfterBackupImport}
-      />
       {aiSettings?.verified ? (
         <AiAssistant
           key={aiSessionEpoch}
           settings={aiSettings}
           launcherHidden={composerOpen}
           onChat={handleAiChat}
+          messageId={aiOpenRequest?.messageId}
+          messageSubject={aiOpenRequest?.subject}
+          openRequest={aiOpenRequest}
         />
       ) : null}
       <BackupImportDialog
@@ -260,13 +240,6 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
         onOpenChange={setBackupImportDialogOpen}
         onBusyChange={setBackupImportBusy}
         onImported={handleBackupImported}
-      />
-      <OutlookImapHelpDialog
-        accountLabel={outlookImapHelpAccount?.name}
-        open={Boolean(outlookImapHelpAccount)}
-        onOpenChange={(open) => {
-          if (!open) setOutlookImapHelpAccount(null)
-        }}
       />
       <MailComposer
         open={composerOpen}

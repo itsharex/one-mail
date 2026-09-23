@@ -20,7 +20,7 @@ import { Alert, AlertTitle } from '@renderer/components/ui/alert'
 import type{ BackupImportResult, BackupSyncSettings } from '@renderer/shared/types'
 import { useI18n, type TranslationKey } from '@renderer/lib/i18n'
 import type { BackupPending, BackupMessage } from './settings-types'
-import { SettingsGroup, SETTINGS_LIST_CLASS } from './settings-ui'
+import { SettingsGroup, SettingsHelp, SETTINGS_LIST_CLASS } from './settings-ui'
 
 export function BackupSettings({
   pending,
@@ -54,12 +54,11 @@ export function BackupSettings({
 
   return (
     <>
-      <div className="flex min-h-full w-full flex-col gap-3 p-3 sm:p-4">
+      <div className="flex w-full flex-col gap-3">
         <SettingsGroup title={t('settings.backup.localGroup')}>
           <div className={SETTINGS_LIST_CLASS}>
             <BackupActionButton
               icon={Download}
-              iconClassName="bg-blue-500"
               title={t('settings.backup.export')}
               loadingTitle={t('settings.backup.exporting')}
               description={t('settings.backup.exportDescription')}
@@ -69,7 +68,6 @@ export function BackupSettings({
             />
             <BackupActionButton
               icon={FileUp}
-              iconClassName="bg-emerald-500"
               title={t('settings.backup.import')}
               loadingTitle={t('settings.backup.importing')}
               description={t('settings.backup.importDescription')}
@@ -83,58 +81,45 @@ export function BackupSettings({
         <SettingsGroup title={t('settings.backup.remoteGroup')}>
           <div className={SETTINGS_LIST_CLASS}>
             {remoteSettings ? (
-              <button
+              <Button
                 type="button"
-                className="flex min-h-12 w-full min-w-0 items-center gap-2.5 px-3 py-2 text-left outline-none transition-colors hover:bg-muted/45 focus-visible:bg-muted/45"
+                variant="ghost"
+                className="h-10 w-full min-w-0 justify-start gap-2.5 rounded-none px-3 py-1.5 text-left hover:bg-muted/45"
                 disabled={disabled}
                 onClick={() => setConfigOpen(true)}
               >
-                <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-cyan-500 text-white shadow-sm">
+                <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted/70 text-muted-foreground">
                   <RemoteIcon className="size-3.5" aria-hidden="true" />
                 </div>
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs font-medium">
-                    {remoteSettings.provider === 'webdav' ? 'WebDAV' : 'S3'}
-                  </div>
-                  <div className="truncate text-xs text-muted-foreground">
-                    {formatRemoteSettingsSummary(remoteSettings)}
-                  </div>
-                </div>
+                <div className="flex min-w-0 flex-1 items-center gap-2"><span className="text-xs font-medium">{remoteSettings.provider === 'webdav' ? 'WebDAV' : 'S3'}</span><span className="truncate text-xs text-muted-foreground">{formatRemoteSettingsSummary(remoteSettings)}</span></div>
                 <span className="shrink-0 text-[11px] text-muted-foreground">
                   {t('settings.backup.remoteEdit')}
                 </span>
                 <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/70" aria-hidden="true" />
-              </button>
+              </Button>
             ) : (
-              <button
+              <Button
                 type="button"
-                className="flex min-h-12 w-full items-center gap-2.5 px-3 py-2 text-left outline-none transition-colors hover:bg-muted/45 focus-visible:bg-muted/45"
+                variant="ghost"
+                className="h-10 w-full justify-start gap-2.5 rounded-none px-3 py-1.5 text-left hover:bg-muted/45"
                 disabled={disabled}
                 onClick={() => setConfigOpen(true)}
               >
-                <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-cyan-500 text-white shadow-sm">
+                <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted/70 text-muted-foreground">
                   <Cloud className="size-3.5" aria-hidden="true" />
                 </div>
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs font-medium">
-                    {t('settings.backup.remoteEmptyTitle')}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    {t('settings.backup.remoteEmptyDescription')}
-                  </div>
-                </div>
+                <div className="flex min-w-0 flex-1 items-center gap-1.5"><span className="text-xs font-medium">{t('settings.backup.remoteEmptyTitle')}</span><SettingsHelp description={t('settings.backup.remoteEmptyDescription')} focusable={false} /></div>
                 <span className="shrink-0 text-[11px] text-primary">
                   {t('settings.backup.remoteAdd')}
                 </span>
                 <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/70" aria-hidden="true" />
-              </button>
+              </Button>
             )}
 
             {remoteSettings ? (
               <>
                 <BackupActionButton
                   icon={RefreshCcw}
-                  iconClassName="bg-teal-500"
                   title={t('settings.backup.remoteTest')}
                   loadingTitle={t('settings.backup.remoteTesting')}
                   loading={pending === 'testRemote'}
@@ -145,7 +130,6 @@ export function BackupSettings({
                 />
                 <BackupActionButton
                   icon={Upload}
-                  iconClassName="bg-blue-500"
                   title={t('settings.backup.remoteUpload')}
                   loadingTitle={t('settings.backup.remoteUploading')}
                   loading={pending === 'uploadRemote'}
@@ -154,7 +138,6 @@ export function BackupSettings({
                 />
                 <BackupActionButton
                   icon={Download}
-                  iconClassName="bg-orange-500"
                   title={t('settings.backup.remoteDownload')}
                   loadingTitle={t('settings.backup.remoteDownloading')}
                   loading={pending === 'downloadRemote'}
@@ -167,16 +150,11 @@ export function BackupSettings({
         </SettingsGroup>
 
         <SettingsGroup title={t('settings.backup.securityGroup')}>
-          <div className={`${SETTINGS_LIST_CLASS} flex min-h-12 items-center gap-2.5 px-3 py-2`}>
-            <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-amber-500 text-white shadow-sm">
+          <div className={`${SETTINGS_LIST_CLASS} flex min-h-10 items-center gap-2.5 px-3 py-1.5`}>
+            <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted/70 text-muted-foreground">
               <KeyRound className="size-3.5" aria-hidden="true" />
             </div>
-            <div className="min-w-0">
-              <div className="text-xs font-medium">{t('settings.backup.securityTitle')}</div>
-              <div className="line-clamp-2 text-xs leading-tight text-muted-foreground">
-                {t('settings.backup.securityDescription')}
-              </div>
-            </div>
+            <div className="flex min-w-0 items-center gap-1.5"><span className="text-xs font-medium">{t('settings.backup.securityTitle')}</span><SettingsHelp description={t('settings.backup.securityDescription')} /></div>
           </div>
         </SettingsGroup>
 
@@ -273,7 +251,6 @@ function BackupMessageView({ message }: { message: BackupMessage }): React.JSX.E
 
 function BackupActionButton({
   icon: Icon,
-  iconClassName,
   title,
   loadingTitle,
   description,
@@ -282,7 +259,6 @@ function BackupActionButton({
   onClick
 }: {
   icon: React.ComponentType<React.SVGProps<SVGSVGElement>>
-  iconClassName: string
   title: string
   loadingTitle: string
   description?: string
@@ -291,26 +267,25 @@ function BackupActionButton({
   onClick: () => void | Promise<void>
 }): React.JSX.Element {
   return (
-    <button
+    <Button
       type="button"
-      className="flex min-h-12 w-full min-w-0 items-center gap-2.5 border-t border-border/60 px-3 py-2 text-left outline-none first:border-t-0 hover:bg-muted/45 focus-visible:bg-muted/45 disabled:pointer-events-none disabled:opacity-50"
+      variant="ghost"
+      className="h-10 w-full min-w-0 justify-start gap-2.5 rounded-none border-t border-border/40 px-3 py-1.5 text-left first:border-t-0 hover:bg-muted/45"
       onClick={onClick}
       disabled={disabled}
     >
       <span
-        className={`flex size-7 shrink-0 items-center justify-center rounded-md text-white shadow-sm ${iconClassName}`}
+        className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted/70 text-muted-foreground"
       >
         <Icon className="size-3.5" aria-hidden="true" />
       </span>
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+      <span className="flex min-w-0 flex-1 items-center gap-1.5">
         <span className="truncate">
           {loading ? <SweepShine>{loadingTitle}</SweepShine> : title}
         </span>
-        {description ? (
-          <span className="text-xs font-normal text-muted-foreground">{description}</span>
-        ) : null}
+        {description ? <SettingsHelp description={description} focusable={false} /> : null}
       </span>
       <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/70" aria-hidden="true" />
-    </button>
+    </Button>
   )
 }

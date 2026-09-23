@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { toast } from 'sonner'
 
 import { AddAccountForm } from '@renderer/components/account/add-account-dialog'
@@ -9,6 +10,10 @@ import { startWindowDrag } from '@renderer/lib/window-drag'
 
 export function AddAccountWindow(): React.JSX.Element {
   const { t } = useI18n()
+
+  React.useEffect(() => {
+    void getCurrentWindow().setTitle(`${t('account.add.title')} - OneMail`)
+  }, [t])
 
   async function handleSubmit(input: AccountCreateInput): Promise<void> {
     const account = await createAccount(input)

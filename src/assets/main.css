@@ -61,7 +61,7 @@
   --ring: oklch(0.5907 0.2061 256.79);
 }
 
-:root[data-platform='darwin'] {
+:root[data-platform='macos'] {
   --app-titlebar-left-offset: 6rem;
 }
 

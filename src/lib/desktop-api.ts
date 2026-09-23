@@ -130,9 +130,13 @@ export function createDesktopApi(): OneMailApi {
       onStatus: (callback) => subscribe<AppUpdateStatus>('updates/status', callback)
     },
     system: {
+      getTheme: () => command('system_get_theme'),
       info: () => command('system_info'),
       setTitleBarTheme: (theme) => command('system_set_title_bar_theme', { theme }),
       revealDatabase: () => command('system_reveal_database'),
+      revealLogs: () => command('system_reveal_logs'),
+      reloadClient: () => command('system_reload_client'),
+      openDevtools: () => command('system_open_devtools'),
       revealPath: (path) => command('system_reveal_path', { path }),
       openExternal: (url) => command('system_open_external', { url })
     }

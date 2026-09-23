@@ -1,4 +1,4 @@
-use tauri::{State, WebviewWindow};
+use tauri::{Emitter, State, WebviewWindow};
 
 use crate::{
     ai::{self, AiChatInput, AiChatResult, AiSettings, AiSettingsInput},
@@ -10,7 +10,7 @@ pub async fn ai_settings_get(
     window: WebviewWindow,
     state: State<'_, AppState>,
 ) -> Result<AiSettings, String> {
-    require_main_window(&window)?;
+    require_settings_window(&window)?;
     ai::settings_get(&state).await
 }
 
@@ -20,8 +20,10 @@ pub async fn ai_settings_verify_and_save(
     state: State<'_, AppState>,
     input: AiSettingsInput,
 ) -> Result<AiSettings, String> {
-    require_main_window(&window)?;
-    ai::settings_verify_and_save(&state, input).await
+    require_settings_window(&window)?;
+    let updated = ai::settings_verify_and_save(&state, input).await?;
+    let _ = window.emit("ai/settingsChanged", ());
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -29,8 +31,10 @@ pub async fn ai_settings_clear(
     window: WebviewWindow,
     state: State<'_, AppState>,
 ) -> Result<AiSettings, String> {
-    require_main_window(&window)?;
-    ai::settings_clear(&state).await
+    require_settings_window(&window)?;
+    let updated = ai::settings_clear(&state).await?;
+    let _ = window.emit("ai/settingsChanged", ());
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -47,6 +51,15 @@ fn require_main_window(window: &WebviewWindow) -> Result<(), String> {
     require_main_window_label(window.label())
 }
 
+fn require_settings_window(window: &WebviewWindow) -> Result<(), String> {
+    require_settings_window_label(window.label())
+}
+
+fn require_settings_window_label(label: &str) -> Result<(), String> {
+    if matches!(label, "main" | "settings") { Ok(()) }
+    else { Err("当前窗口无权修改 AI 设置。".to_string()) }
+}
+
 fn require_main_window_label(label: &str) -> Result<(), String> {
     if label == "main" {
         Ok(())
@@ -57,12 +70,20 @@ fn require_main_window_label(label: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::require_main_window_label;
+    use super::{require_main_window_label, require_settings_window_label};
 
     #[test]
     fn ai_commands_only_allow_the_main_window() {
         assert!(require_main_window_label("main").is_ok());
         assert!(require_main_window_label("add-account").is_err());
         assert!(require_main_window_label("").is_err());
+    }
+
+    #[test]
+    fn settings_window_can_manage_ai_but_cannot_chat() {
+        assert!(require_settings_window_label("settings").is_ok());
+        assert!(require_settings_window_label("main").is_ok());
+        assert!(require_settings_window_label("add-account").is_err());
+        assert!(require_main_window_label("settings").is_err());
     }
 }

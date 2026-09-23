@@ -6,6 +6,7 @@ export type SettingsFormValues = {
   bodyDisplayMode: 'text' | 'html'
   syncIntervalMinutes: number
   syncWindowDays: number
+  logRetentionDays: number
   openAtLogin: boolean
   externalImagesBlocked: boolean
   locale: 'zh-CN' | 'en-US'
@@ -23,6 +24,7 @@ export function createSettingsSchema(t: (key: TranslationKey) => string) {
       .int(t('settings.syncWindow.errorInteger'))
       .min(1, t('settings.syncWindow.errorMin'))
       .max(3650, t('settings.syncWindow.errorMax')),
+    logRetentionDays: z.coerce.number<number>().int().min(1).max(365),
     openAtLogin: z.boolean(),
     externalImagesBlocked: z.boolean(),
     bodyDisplayMode: z.enum(['text', 'html']),
@@ -34,6 +36,7 @@ export function toFormValues(settings: AppSettings | null): SettingsFormValues {
   return {
     syncIntervalMinutes: settings?.syncIntervalMinutes ?? 15,
     syncWindowDays: settings?.syncWindowDays ?? 90,
+    logRetentionDays: settings?.logRetentionDays ?? 7,
     openAtLogin: settings?.openAtLogin === true,
     externalImagesBlocked: settings?.externalImagesBlocked !== false,
     bodyDisplayMode: settings?.bodyDisplayMode === 'html' ? 'html' : 'text',
@@ -45,6 +48,7 @@ export function areSettingsEqual(first: SettingsFormValues, second: SettingsForm
   return (
     first.syncIntervalMinutes === second.syncIntervalMinutes &&
     first.syncWindowDays === second.syncWindowDays &&
+    first.logRetentionDays === second.logRetentionDays &&
     first.openAtLogin === second.openAtLogin &&
     first.externalImagesBlocked === second.externalImagesBlocked &&
     first.bodyDisplayMode === second.bodyDisplayMode &&

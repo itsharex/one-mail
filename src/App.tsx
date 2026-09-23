@@ -24,7 +24,7 @@ function App(): React.JSX.Element {
           >
             <RouterProvider router={appRouter} />
           </Suspense>
-          <Toaster richColors />
+          <Toaster richColors position="top-right" />
           <BuildInfo />
         </I18nProvider>
       </QueryClientProvider>

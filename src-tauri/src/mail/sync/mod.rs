@@ -2,18 +2,20 @@ mod gmail_api;
 mod graph_api;
 mod imap;
 
-use imap::sync_account_imap;
+use imap::{sync_account_imap, ImapSyncScope};
 
 use futures_util::{stream, StreamExt};
 use std::future::Future;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
-use crate::{db, mail::transport as mail_transport, state::AppState};
+use crate::{db, mail::transport as mail_transport, state::{AppState, SYNC_CONCURRENCY}};
 
-const SYNC_CONCURRENCY: usize = 4;
+const ACCOUNT_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
-pub async fn sync_all(state: &AppState, mode: Option<&str>, on_complete: impl Fn(&Value, usize, usize)) -> Result<Value, String> {
+pub type SyncStepCallback<'a> = dyn Fn(i64, &str, Option<&str>) + Send + Sync + 'a;
+
+pub async fn sync_all(state: &AppState, mode: Option<&str>, on_complete: impl Fn(&Value, usize, usize), on_step: Option<&SyncStepCallback<'_>>) -> Result<Value, String> {
     let accounts = {
         let connection = db::open(state)?;
         let mut statement = connection
@@ -47,9 +49,16 @@ pub async fn sync_all(state: &AppState, mode: Option<&str>, on_complete: impl Fn
         if let Some(error) = sync_skip_reason(&account) {
             return account_sync_skipped(&account, error);
         }
-        match sync_account(state, account.account_id, mode).await {
-            Ok(value) => value,
-            Err(error) => json!({ "accountId": account.account_id, "ok": false, "error": error }),
+        loop {
+            match sync_account(state, account.account_id, mode, on_step).await {
+                Ok(value) if value.get("busy").and_then(Value::as_bool) == Some(true) => {
+                    if let Err(error) = state.sync_tracker.wait_until_idle(account.account_id).await {
+                        break json!({ "accountId": account.account_id, "ok": false, "error": error });
+                    }
+                }
+                Ok(value) => break value,
+                Err(error) => break json!({ "accountId": account.account_id, "ok": false, "error": error }),
+            }
         }
     }).collect();
     let results = run_sync_tasks(tasks, on_complete).await;
@@ -83,6 +92,12 @@ struct SyncAccountTarget {
 }
 
 fn sync_skip_reason(account: &SyncAccountTarget) -> Option<String> {
+    let stale_imap_access_error = account.auth_type == "oauth2"
+        && account.last_error.as_deref().is_some_and(|error|
+            error.to_ascii_lowercase().contains("authenticated but not connected"));
+    if stale_imap_access_error {
+        return None;
+    }
     if account.connection_state == "reauthorize" {
         return Some(
             non_empty_error(account)
@@ -130,23 +145,31 @@ pub async fn sync_account(
     state: &AppState,
     account_id: i64,
     mode: Option<&str>,
+    on_step: Option<&SyncStepCallback<'_>>,
 ) -> Result<Value, String> {
+    let _slot = state.sync_tracker.acquire_slot().await?;
     let _sync_guard = match state.sync_tracker.start(account_id)? {
         Some(guard) => guard,
-        None => return Ok(json!({ "accountId": account_id, "ok": false, "skipped": true, "error": "账号正在同步。" })),
+        None => return Ok(json!({ "accountId": account_id, "ok": false, "skipped": true, "busy": true, "error": "账号正在同步。" })),
     };
     let account = mail_transport::load_account(state, account_id)?;
+    if let Some(emit) = on_step { emit(account_id, "connecting", None); }
     set_syncing(state, account_id)?;
 
-    let result = sync_account_inner(state, &account).await;
+    let result = tokio::time::timeout(ACCOUNT_SYNC_TIMEOUT, sync_account_inner(state, &account, mode, on_step))
+        .await
+        .unwrap_or_else(|_| Err("账号同步超过 60 分钟，已停止本次同步。".to_string()));
     match result {
         Ok(mut value) => {
+            let sync_error = (value.get("ok").and_then(Value::as_bool) == Some(false))
+                .then(|| value.get("error").and_then(Value::as_str).unwrap_or("部分文件夹同步失败。"));
             let connection = db::open(state)?;
             connection
                 .execute(
-                    "UPDATE onemail_mail_accounts SET status='active',last_sync_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-                       last_error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE account_id=?1",
-                    [account_id],
+                    "UPDATE onemail_mail_accounts SET status=CASE WHEN ?2 IS NULL THEN 'active' ELSE 'sync_error' END,
+                       last_sync_at=CASE WHEN ?2 IS NULL THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE last_sync_at END,
+                       last_error=?2,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE account_id=?1",
+                    params![account_id, sync_error],
                 )
                 .map_err(|error| format!("更新同步状态失败：{error}"))?;
             if let Some(object) = value.as_object_mut() {
@@ -178,27 +201,45 @@ pub async fn sync_account(
 async fn sync_account_inner(
     state: &AppState,
     account: &mail_transport::MailAccount,
+    mode: Option<&str>,
+    on_step: Option<&SyncStepCallback<'_>>,
 ) -> Result<Value, String> {
+    let imap_scope = match mode {
+        Some("background-inbox") => ImapSyncScope::Inbox,
+        Some("background-other-folders") => ImapSyncScope::OtherFolders,
+        _ => ImapSyncScope::All,
+    };
+    if imap_scope == ImapSyncScope::OtherFolders {
+        return sync_account_imap(state, account, imap_scope, on_step).await;
+    }
     let provider_key = account.provider_key.to_ascii_lowercase();
     if account.auth_type == "oauth2" && matches!(provider_key.as_str(), "gmail" | "google") {
+        if let Some(emit) = on_step { emit(account.account_id, "requesting", None); }
         match gmail_api::sync(state, account).await {
             Ok(value) => return Ok(value),
             Err(reason) => {
-                let value = sync_account_imap(state, account).await?;
+                if let Some(error) = reason.strip_prefix("API_RETRYABLE:") {
+                    return Err(error.trim().to_string());
+                }
+                let value = sync_account_imap(state, account, imap_scope, on_step).await?;
                 return Ok(with_api_fallback(value, "gmail-history", reason));
             }
         }
     }
     if account.auth_type == "oauth2" && matches!(provider_key.as_str(), "outlook" | "microsoft") {
+        if let Some(emit) = on_step { emit(account.account_id, "requesting", None); }
         match graph_api::sync(state, account).await {
             Ok(value) => return Ok(value),
             Err(reason) => {
-                let value = sync_account_imap(state, account).await?;
+                if let Some(error) = reason.strip_prefix("API_RETRYABLE:") {
+                    return Err(error.trim().to_string());
+                }
+                let value = sync_account_imap(state, account, imap_scope, on_step).await?;
                 return Ok(with_api_fallback(value, "graph-delta", reason));
             }
         }
     }
-    sync_account_imap(state, account).await
+    sync_account_imap(state, account, imap_scope, on_step).await
 }
 
 fn with_api_fallback(mut value: Value, api: &str, reason: String) -> Value {

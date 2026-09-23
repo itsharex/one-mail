@@ -1,8 +1,10 @@
 import type { AppSettings, AppUpdateStatus, SystemInfo } from '@renderer/shared/types'
+import type { Account } from '@renderer/components/mail/types'
 import * as React from 'react'
+import { useIsFetching } from '@tanstack/react-query'
 import { createPortal } from 'react-dom'
+import { toast } from 'sonner'
 import {
-  AlertCircle,
   ChevronDown,
   CloudDownload,
   FileUp,
@@ -206,38 +208,66 @@ function SettingsButton({
 }
 
 export function StatusBar({
+  loading,
+  selectedAccount,
+  accountAddresses,
   systemInfo,
   settings,
   accountCount,
   messageCount,
   syncNotice,
   error,
-  syncErrors = [],
-  onDismissError,
   updateStatus,
   onOpenVersion,
   onInstallUpdate
 }: {
+  loading: boolean
+  selectedAccount: Account
+  accountAddresses: string[]
   systemInfo: SystemInfo | null
   settings: AppSettings | null
   accountCount: number
   messageCount: number
   syncNotice: SyncNotice
   error?: string | null
-  syncErrors?: string[]
-  onDismissError?: () => void
   updateStatus: AppUpdateStatus | null
   onOpenVersion: () => void
   onInstallUpdate: () => void
 }): React.JSX.Element {
   const { t } = useI18n()
+  const loadingConversations = useIsFetching({ queryKey: ['conversations', 'list', selectedAccount.accountId ?? null] }) > 0
+  const loadingMessages = useIsFetching({ queryKey: ['conversations', 'messages', selectedAccount.accountId ?? null] }) > 0
   const syncText = formatSyncNotice(syncNotice, t)
+  const idleText = syncText ? '' : error || (loading
+    ? t('status.databaseLoading')
+    : loadingConversations
+      ? selectedAccount.accountId
+        ? t('status.loadingConversations', { account: selectedAccount.address })
+        : t('status.loadingAllConversations', { count: accountCount })
+      : loadingMessages
+        ? selectedAccount.accountId
+          ? t('status.loadingMessages', { account: selectedAccount.address })
+          : t('status.loadingAllMessages')
+        : t('status.ready'))
+  const ready = !syncText && !error && !loading && !loadingConversations && !loadingMessages
+  const idleTitle = !selectedAccount.accountId && loadingConversations
+    ? `${idleText}\n${accountAddresses.join('\n')}`
+    : idleText
+  const syncActivityText = syncNotice.state === 'running' && syncNotice.activity
+    ? `${syncNotice.activity.account} · ${formatSyncStep(syncNotice.activity.stage, t)}${syncNotice.activity.folder ? ` · ${syncNotice.activity.folder}` : ''}`
+    : syncText
   const updateText = formatUpdateStatus(updateStatus, t)
   const hasUpdate = hasAvailableUpdate(updateStatus)
   const [activeDetails, setActiveDetails] = React.useState<'sync' | 'update' | null>(null)
+  const syncProgress = syncNotice.state === 'running' && syncNotice.progress?.total
+    ? Math.min(100, Math.max(0, syncNotice.progress.completed / syncNotice.progress.total * 100))
+    : null
+  const updateProgress = updateStatus?.state === 'downloading' && updateStatus.progress
+    ? Math.min(100, Math.max(0, updateStatus.progress.percent))
+    : null
   React.useEffect(() => {
-    if (syncNotice.state === 'error' || syncErrors.length > 0) setActiveDetails('sync')
-  }, [syncNotice.state, syncNotice.finishedAt, syncErrors.length])
+    if (error && syncNotice.state !== 'running' && syncNotice.state !== 'error') toast.error(error, { duration: 8000 })
+  }, [error, syncNotice.state])
   React.useEffect(() => {
     if (!activeDetails) return
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -256,28 +286,26 @@ export function StatusBar({
 
   return (
     <>
-    {(error || syncErrors.length > 0) && <section role="alert" className="shrink-0 border-t border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-      <div className="mb-1 flex items-center gap-1.5 font-medium">
-        <AlertCircle className="size-3.5" aria-hidden="true" />
-        <span className="flex-1">{t('mailbox.errorDetails')}</span>
-        {onDismissError && <Button variant="ghost" size="icon-sm" className="size-5 text-destructive" onClick={onDismissError} aria-label={t('common.close')}><X className="size-3.5" /></Button>}
-      </div>
-      <div className="max-h-32 select-text overflow-y-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-        {error && <p>{error}</p>}
-        {syncErrors.length > 0 && <ul className="space-y-1">{syncErrors.map((message, index) => <li key={index}>{message}</li>)}</ul>}
-      </div>
-    </section>}
-    <footer className="app-drag-region native-statusbar flex h-7 shrink-0 items-center justify-end border-t px-2 text-[11px] text-muted-foreground">
-      <div className="app-no-drag flex min-w-0 items-center justify-end gap-1.5 overflow-hidden">
+    <footer className="app-drag-region native-statusbar flex h-7 shrink-0 items-center justify-between gap-2 border-t px-2 text-[11px] text-muted-foreground">
+      <div className="app-no-drag flex min-w-0 items-center gap-1.5 overflow-hidden">
+        {idleText && <span role="status" className={cn('flex min-w-0 items-center gap-1.5 text-foreground', error && 'text-destructive')} title={idleTitle}>
+          <StatusDot active={!ready && !error} error={Boolean(error)} />
+          <span className="min-w-0 truncate">{!ready && !error ? <SweepShine>{idleText}</SweepShine> : idleText}</span>
+        </span>}
         {syncText ? (
-          <button type="button" className={cn('flex min-w-0 max-w-[min(40vw,24rem)] items-center gap-1 text-left text-foreground hover:underline', syncNotice.state === 'error' && 'text-destructive')} title={syncText} aria-expanded={activeDetails === 'sync'} onClick={() => setActiveDetails(activeDetails === 'sync' ? null : 'sync')}>
-            <span className={cn('size-1.5 shrink-0 rounded-full', syncNotice.state === 'error' ? 'bg-destructive' : 'bg-primary')} aria-hidden="true" />
-            <span className="truncate">{syncNotice.state === 'running' ? <SweepShine>{syncText}</SweepShine> : syncText}</span>
+          <button type="button" className={cn('flex min-w-0 max-w-[min(55vw,30rem)] items-center gap-1.5 text-left text-foreground hover:underline', syncNotice.state === 'error' && 'text-destructive')} title={syncActivityText} aria-expanded={activeDetails === 'sync'} onClick={() => setActiveDetails(activeDetails === 'sync' ? null : 'sync')}>
+            <StatusDot active={syncNotice.state === 'running'} error={syncNotice.state === 'error'} />
+            <span className="truncate">{syncNotice.state === 'running' ? <SweepShine>{syncActivityText}</SweepShine> : syncText}</span>
+            {syncNotice.state === 'running' && syncNotice.progress && <span className="shrink-0 text-muted-foreground">{syncNotice.progress.completed}/{syncNotice.progress.total}</span>}
+            {syncProgress !== null && <SyncRing percent={syncProgress} />}
           </button>
         ) : null}
+      </div>
+      <div className="app-no-drag ml-auto flex min-w-0 items-center justify-end gap-1.5 overflow-hidden">
         {updateText ? (
           <button type="button" className="max-w-[min(40vw,24rem)] truncate rounded-sm bg-background/60 px-1.5 text-left text-foreground hover:underline" title={updateText} aria-expanded={activeDetails === 'update'} onClick={() => setActiveDetails(activeDetails === 'update' ? null : 'update')}>
             {updateStatus?.state === 'checking' || updateStatus?.state === 'downloading' || updateStatus?.state === 'installing' ? <SweepShine>{updateText}</SweepShine> : updateText}
+            {updateProgress !== null && <span className="ml-1 inline-block h-1 w-10 overflow-hidden rounded-full bg-muted align-middle" aria-hidden="true"><span className="block h-full rounded-full bg-primary" style={{ width: `${updateProgress}%` }} /></span>}
           </button>
         ) : null}
         {updateStatus?.state === 'downloaded' ? (
@@ -315,30 +343,32 @@ export function StatusBar({
       </div>
     </footer>
     {activeDetails && (activeDetails === 'sync' ? syncText : updateText) ? createPortal(
-      <section role="dialog" aria-label={activeDetails === 'sync' ? t('status.syncDetails') : t('status.updateDetails')} className="fixed right-3 bottom-10 z-50 flex w-[min(20rem,calc(100vw-1.5rem))] flex-col rounded-lg border bg-popover text-popover-foreground shadow-xl">
+      <section role="dialog" aria-label={activeDetails === 'sync' ? t('status.syncDetails') : t('status.updateDetails')} className="fixed right-3 bottom-10 z-50 flex w-[min(26rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-lg border bg-popover text-popover-foreground shadow-xl">
         <header className="flex items-center justify-between border-b px-3 py-1.5 text-xs font-medium">
           <span>{activeDetails === 'sync' ? t('status.syncDetails') : t('status.updateDetails')}</span>
           <Button variant="ghost" size="icon-sm" className="size-5" aria-label={t('common.close')} onClick={() => setActiveDetails(null)}><X className="size-3.5" /></Button>
         </header>
-        <div className="max-h-48 overflow-y-auto px-3 py-2 text-xs leading-5 select-text break-words [overflow-wrap:anywhere]">
-          {activeDetails === 'sync' ? (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-3">
-                <span className={cn('font-medium', syncNotice.state === 'error' && 'text-destructive')}>{syncNotice.state === 'running' ? t('sync.running') : syncNotice.state === 'success' ? t('sync.success') : t('sync.error')}</span>
-                {syncNotice.startedAt && syncNotice.finishedAt && <span className="shrink-0 text-muted-foreground">{t('status.syncDuration', { seconds: Math.max(1, Math.round((syncNotice.finishedAt.getTime() - syncNotice.startedAt.getTime()) / 1000)) })}</span>}
+        <div className="max-h-[min(24rem,60vh)] overflow-y-auto text-xs leading-5 select-text break-words [overflow-wrap:anywhere]">
+          {activeDetails === 'sync' ? <>
+            <div className="space-y-1 border-b bg-muted/30 px-3 py-2">
+              <div className="flex items-center gap-2 font-medium">
+                {syncProgress !== null ? <SyncRing percent={syncProgress} /> : syncNotice.state !== 'running' ? <span className={cn('size-2 rounded-full', syncNotice.state === 'error' ? 'bg-destructive' : 'bg-primary')} aria-hidden="true" /> : null}
+                <span className={syncNotice.state === 'error' ? 'text-destructive' : undefined}>{syncNotice.state === 'running' ? <SweepShine>{t('sync.running')}</SweepShine> : syncNotice.state === 'success' ? t('sync.success') : t('sync.error')}</span>
+                {syncNotice.progress && <span className="ml-auto tabular-nums text-muted-foreground">{syncNotice.progress.completed}/{syncNotice.progress.total}</span>}
               </div>
-              {syncNotice.label && <p className="text-muted-foreground">{syncNotice.label}</p>}
-              {syncNotice.state === 'running' && <p><SweepShine>{syncText}</SweepShine></p>}
-              {syncNotice.state === 'success' && syncNotice.message && <p>{syncNotice.message}</p>}
-              {syncNotice.state === 'error' && <p className="text-destructive">{syncNotice.message}</p>}
-              {syncErrors.length > 0 && <ul className="space-y-1 text-destructive">{syncErrors.map((message, index) => <li key={index}>{message}</li>)}</ul>}
+              {syncNotice.state !== 'running' && <p className={syncNotice.state === 'error' ? 'text-destructive' : 'text-muted-foreground'}>{syncText}</p>}
             </div>
-          ) : (
-            <>
-              <p>{updateText}</p>
-              {updateStatus?.message && updateStatus.message !== updateText && <p className="text-muted-foreground">{updateStatus.message}</p>}
-            </>
-          )}
+            {syncNotice.steps && syncNotice.steps.length > 0 && <ol className="py-1 font-mono text-[11px] leading-5">{syncNotice.steps.map((step, index) => <li key={index} className="flex gap-2 px-3 py-1 even:bg-muted/25">
+              <span className="shrink-0 select-none tabular-nums text-muted-foreground/60">{String(index + 1).padStart(2, '0')}</span>
+              <span className="min-w-0 flex-1 truncate text-muted-foreground" title={step.account}>{step.account}</span>
+              <span className="shrink-0 text-foreground">{formatSyncStep(step.stage, t)}</span>
+              {step.folder && <span className="min-w-0 truncate text-muted-foreground" title={step.folder}>{step.folder}</span>}
+            </li>)}</ol>}
+          </> : <div className="px-3 py-2">
+            <p>{updateText}</p>
+            {updateStatus?.message && updateStatus.message !== updateText && <p className="text-muted-foreground">{updateStatus.message}</p>}
+            {updateProgress !== null && <div role="progressbar" aria-label={t('status.updateDetails')} aria-valuenow={Math.round(updateProgress)} aria-valuemin={0} aria-valuemax={100} className="h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${updateProgress}%` }} /></div>}
+          </div>}
         </div>
         <footer className="flex justify-end gap-1.5 border-t px-3 py-1.5">
           {activeDetails === 'update' && updateStatus?.state === 'downloaded' && <Button size="xs" onClick={onInstallUpdate}>{t('status.updateRestart')}</Button>}
@@ -349,6 +379,34 @@ export function StatusBar({
     ) : null}
     </>
   )
+}
+
+function StatusDot({ active, error }: { active: boolean; error: boolean }): React.JSX.Element {
+  return <span className="relative flex size-2 shrink-0 items-center justify-center" aria-hidden="true">
+    {active && <span className="absolute size-2 rounded-full bg-primary/30 motion-safe:animate-ping [animation-duration:2s]" />}
+    <span className={cn('relative size-1.5 rounded-full', error ? 'bg-destructive' : 'bg-primary')} />
+  </span>
+}
+
+function SyncRing({ percent, size = 14 }: { percent: number; size?: number }): React.JSX.Element {
+  return <svg width={size} height={size} viewBox="0 0 24 24" className="shrink-0 text-primary" aria-hidden="true">
+    <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeOpacity="0.18" strokeWidth="3" />
+    <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeDasharray={2 * Math.PI * 9} strokeDashoffset={2 * Math.PI * 9 * (1 - percent / 100)} transform="rotate(-90 12 12)" />
+  </svg>
+}
+
+function formatSyncStep(stage: string, t: ReturnType<typeof useI18n>['t']): string {
+  switch (stage) {
+    case 'connecting': return t('status.syncConnecting')
+    case 'requesting': return t('status.syncRequesting')
+    case 'folder': return t('status.syncFolder')
+    case 'fetching': return t('status.syncFetching')
+    case 'saving': return t('status.syncSaving')
+    case 'complete': return t('status.syncAccountComplete')
+    case 'failed': return t('status.syncAccountFailed')
+    case 'skipped': return t('status.syncAccountSkipped')
+    default: return t('sync.running')
+  }
 }
 
 function formatUpdateStatus(

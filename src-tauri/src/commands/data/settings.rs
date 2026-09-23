@@ -1,8 +1,8 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
-use crate::{db, state::AppState};
+use crate::{background, client_log, db, state::AppState};
 
 use super::utils::{database_error, optional_bool, optional_i64, optional_string, require_object};
 
@@ -13,6 +13,7 @@ pub fn settings_get(state: State<'_, AppState>) -> Result<Value, String> {
     Ok(json!({
         "syncIntervalMinutes": read_setting_i64(&connection, "sync_interval_minutes", 15)?,
         "syncWindowDays": read_setting_i64(&connection, "sync_window_days", 90)?,
+        "logRetentionDays": client_log::retention_days(&state),
         "openAtLogin": read_setting_bool(&connection, "open_at_login", false)?,
         "externalImagesBlocked": read_setting_bool(&connection, "external_images_blocked", true)?,
         "bodyDisplayMode": read_setting_string(&connection, "body_display_mode", "text")?,
@@ -21,7 +22,7 @@ pub fn settings_get(state: State<'_, AppState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn settings_update(state: State<'_, AppState>, input: Value) -> Result<Value, String> {
+pub fn settings_update(app: AppHandle, state: State<'_, AppState>, input: Value) -> Result<Value, String> {
     let current = settings_get(state.clone())?;
     let current_object = require_object(&current)?;
     let input_object = require_object(&input)?;
@@ -31,15 +32,24 @@ pub fn settings_update(state: State<'_, AppState>, input: Value) -> Result<Value
     if !matches!(body_display_mode.as_str(), "text" | "html") {
         return Err("正文显示方式无效。".to_string());
     }
+    let sync_interval_minutes = optional_i64(input_object, "syncIntervalMinutes")
+        .or_else(|| optional_i64(current_object, "syncIntervalMinutes"))
+        .unwrap_or(15);
+    if !(0..=1440).contains(&sync_interval_minutes) {
+        return Err("同步间隔必须在 0 到 1440 分钟之间。".to_string());
+    }
+    let log_retention_days = optional_i64(input_object, "logRetentionDays")
+        .or_else(|| optional_i64(current_object, "logRetentionDays"))
+        .unwrap_or(7);
+    if !(1..=365).contains(&log_retention_days) {
+        return Err("日志保留天数必须在 1 到 365 天之间。".to_string());
+    }
     let connection = db::open(&state)?;
 
     write_setting(
         &connection,
         "sync_interval_minutes",
-        &optional_i64(input_object, "syncIntervalMinutes")
-            .or_else(|| optional_i64(current_object, "syncIntervalMinutes"))
-            .unwrap_or(15)
-            .to_string(),
+        &sync_interval_minutes.to_string(),
         "number",
     )?;
     write_setting(
@@ -51,6 +61,7 @@ pub fn settings_update(state: State<'_, AppState>, input: Value) -> Result<Value
             .to_string(),
         "number",
     )?;
+    write_setting(&connection, "log_retention_days", &log_retention_days.to_string(), "number")?;
     write_setting(
         &connection,
         "open_at_login",
@@ -82,7 +93,14 @@ pub fn settings_update(state: State<'_, AppState>, input: Value) -> Result<Value
         .unwrap_or_else(|| "zh-CN".to_string());
     write_setting(&connection, "locale", &locale, "string")?;
     write_setting(&connection, "body_display_mode", &body_display_mode, "string")?;
-    settings_get(state)
+    let updated = settings_get(state)?;
+    if let Err(error) = client_log::cleanup(&app, log_retention_days) {
+        eprintln!("OneMail log cleanup failed: {error}");
+    }
+    let _ = client_log::write(&app, "INFO Settings updated");
+    background::wake(&app);
+    let _ = app.emit("settings/changed", &updated);
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -146,6 +164,7 @@ fn ensure_default_settings(connection: &Connection) -> Result<(), String> {
     for (key, value, value_type) in [
         ("sync_interval_minutes", "15", "number"),
         ("sync_window_days", "90", "number"),
+        ("log_retention_days", "7", "number"),
         ("open_at_login", "0", "boolean"),
         ("external_images_blocked", "1", "boolean"),
         ("body_display_mode", "text", "string"),

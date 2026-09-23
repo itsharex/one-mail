@@ -1,4 +1,6 @@
 mod ai;
+mod background;
+mod client_log;
 mod commands;
 mod db;
 mod mail;
@@ -69,18 +71,46 @@ pub fn run() {
             }
             let state = AppState::initialize(app.handle())?;
             db::initialize(&state)?;
+            if let Err(error) = client_log::cleanup(app.handle(), client_log::retention_days(&state)) {
+                eprintln!("OneMail log cleanup failed: {error}");
+            }
+            let _ = client_log::write(app.handle(), "INFO Client started");
             app.manage(state);
+            background::start(app.handle())?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::Focused(true) = event {
+                    let app = window.app_handle();
+                    let days = client_log::retention_days(app.state::<AppState>().inner());
+                    if let Err(error) = client_log::cleanup(app, days) {
+                        eprintln!("OneMail log cleanup failed: {error}");
+                    }
+                    let _ = client_log::write(app, "INFO Client focused");
+                }
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             system::system_info,
             system::system_set_title_bar_theme,
+            system::system_get_theme,
             system::system_reveal_database,
             system::system_reveal_path,
+            system::system_reveal_logs,
+            system::system_reload_client,
+            system::system_open_devtools,
             system::system_open_external,
             system::system_send_notification,
             system::system_take_notification_message,
             system::accounts_open_add_window,
+            system::settings_open_window,
+            system::settings_close_window,
+            system::original_message_open_window,
             system::accounts_close_add_window,
             data::accounts::accounts_list,
             data::accounts::accounts_discover_folders,
@@ -136,6 +166,16 @@ pub fn run() {
             data::updates::updates_status,
             data::updates::updates_install
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running OneMail");
+        .build(tauri::generate_context!())
+        .expect("error while building OneMail")
+        .run(|app, event| {
+            match event {
+                tauri::RunEvent::Resumed => background::wake(app),
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { has_visible_windows: false, .. } => {
+                    background::show_main_window(app);
+                }
+                _ => {}
+            }
+        });
 }

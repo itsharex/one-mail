@@ -1,8 +1,12 @@
 import { useEffect, useRef } from "react";
+import { invoke } from '@tauri-apps/api/core';
+import { emitTo, listen } from '@tauri-apps/api/event';
 import { formatAbsoluteTime, formatRelativeTime } from "@renderer/components/mail/date-format";
 import { Loader2, MessageCircle, Plus, Search } from "lucide-react";
 import { Button } from "@renderer/components/ui/button";
 import { Input } from "@renderer/components/ui/input";
+import { Skeleton } from "@renderer/components/ui/skeleton";
+import { CopyableText } from "@renderer/components/ui/copyable-text";
 import { Account } from "@renderer/components/mail/types";
 import { useI18n } from "@renderer/lib/i18n";
 import { startWindowDrag } from "@renderer/lib/window-drag";
@@ -10,6 +14,7 @@ import { cn } from "@renderer/lib/utils";
 import { useConversations } from "../use-conversations";
 import { toast } from "sonner";
 import { AppSettings } from "@renderer/shared/types";
+import type { ConversationMessage } from "@renderer/shared/conversations";
 import '../conversation-workspace.css';
 import { ConversationPane } from './conversation-pane';
 import { ConversationAvatar } from './conversation-avatar';
@@ -23,6 +28,7 @@ export type ConversationWorkspaceProps = {
   refreshKey?: number;
   openMessageId?: number | null;
   onOpenMessageHandled?: () => void;
+  onAskAi?: (message: ConversationMessage) => void;
 };
 
 export function ConversationWorkspace({
@@ -34,6 +40,7 @@ export function ConversationWorkspace({
   refreshKey,
   openMessageId,
   onOpenMessageHandled,
+  onAskAi,
 }: ConversationWorkspaceProps) {
   const { locale } = useI18n();
   const zh = locale === "zh-CN";
@@ -43,6 +50,25 @@ export function ConversationWorkspace({
   const listRoot = useRef<HTMLDivElement>(null);
   const loadMoreTarget = useRef<HTMLDivElement>(null);
   const openingMessageId = useRef<number | null>(null);
+  const originalMessage = useRef<ConversationMessage | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    let stop: (() => void) | undefined;
+    void listen('original/ready', () => {
+      if (originalMessage.current) void emitTo('original-message', 'original/message', originalMessage.current)
+        .catch((reason) => console.warn('Failed to send original message.', reason));
+    }).then((unlisten) => { if (active) stop = unlisten; else unlisten(); })
+      .catch((reason) => console.warn('Failed to listen for original message window.', reason));
+    return () => { active = false; stop?.(); };
+  }, []);
+
+  function openOriginal(message: ConversationMessage): void {
+    originalMessage.current = message;
+    void invoke('original_message_open_window')
+      .then(() => emitTo('original-message', 'original/message', message))
+      .catch((reason) => toast.error(String(reason)));
+  }
 
   useEffect(() => {
     if (!openMessageId) {
@@ -134,12 +160,11 @@ export function ConversationWorkspace({
             </p>
           )}
           {state.loading && state.conversations.length === 0 && (
-            <div
-              role="status"
-              className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground"
-            >
-              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-              {text("加载中…", "Loading…")}
+            <div role="status" aria-label={text("加载对话中", "Loading conversations")} className="space-y-1 px-3 py-2">
+              {Array.from({ length: 6 }, (_, index) => <div key={index} className="flex items-center gap-3 py-2">
+                <Skeleton className="size-9 shrink-0 rounded-full" />
+                <div className="min-w-0 flex-1 space-y-2"><Skeleton className="h-3 w-3/5" /><Skeleton className="h-2.5 w-4/5" /></div>
+              </div>)}
             </div>
           )}
           {!state.loading &&
@@ -150,22 +175,22 @@ export function ConversationWorkspace({
               </p>
             )}
           {state.conversations.map((item) => (
-            <button
+            <div
               key={item.conversationId}
-              type="button"
-              aria-current={
-                selected?.conversationId === item.conversationId
-                  ? "true"
-                  : undefined
-              }
-              onClick={() => state.setSelectedId(item.conversationId)}
               className={cn(
-                "conversation-row flex w-full items-center gap-2.5 px-3.5 py-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+                "conversation-row relative flex w-full items-center gap-2.5 px-3.5 py-2 text-left",
                 selected?.conversationId === item.conversationId &&
                   "is-selected",
               )}
             >
-              <div className="relative shrink-0">
+              <button
+                type="button"
+                className="absolute inset-0 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                aria-current={selected?.conversationId === item.conversationId ? "true" : undefined}
+                aria-label={item.participants.map((person) => person.email).join(', ')}
+                onClick={() => state.setSelectedId(item.conversationId)}
+              />
+              <div className="pointer-events-none relative shrink-0">
                 <ConversationAvatar
                   seed={item.participants[0]?.email || item.conversationId}
                   members={item.isGroup ? item.participants : undefined}
@@ -184,14 +209,12 @@ export function ConversationWorkspace({
                   </span>
                 )}
               </div>
-              <div className="min-w-0 flex-1">
+              <div className="pointer-events-none relative min-w-0 flex-1">
                 <div className="flex items-center gap-2">
-                  <span
-                    className="min-w-0 flex-1 truncate text-sm font-medium"
-                    title={item.displayName}
-                  >
-                    {item.displayName}
-                  </span>
+                  <CopyableText
+                    value={item.participants.map((person) => person.email).join(', ')}
+                    className="pointer-events-auto min-w-0 flex-1 text-sm font-medium"
+                  />
                   <time
                     dateTime={item.lastMessage.receivedAt}
                     title={formatAbsoluteTime(item.lastMessage.receivedAt)}
@@ -213,10 +236,10 @@ export function ConversationWorkspace({
                     text("无主题", "No subject")}
                 </p>
               </div>
-            </button>
+            </div>
           ))}
           <div ref={loadMoreTarget} className="min-h-px">
-            {state.loading && state.conversations.length > 0 && (
+            {state.loadingMore && (
               <div
                 role="status"
                 className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground"
@@ -232,16 +255,19 @@ export function ConversationWorkspace({
         <ConversationPane
           key={`${accountId ?? "all"}:${selected.conversationId}`}
           conversation={selected}
+          onAskAi={onAskAi}
           settings={settings}
           messages={state.messages}
           focusedMessageId={state.focusedMessageId}
           accounts={accounts}
           loading={state.loadingMessages}
+          loadingOlder={state.loadingOlder}
           error={state.messageError}
           hasOlder={state.hasOlder}
           loadOlder={state.loadOlder}
           onBack={() => state.setSelectedId(null)}
           onOpenOutbox={onOpenOutbox}
+          onOpenOriginal={openOriginal}
           refresh={state.refresh}
         />
       ) : (

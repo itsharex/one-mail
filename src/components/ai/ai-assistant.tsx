@@ -23,6 +23,7 @@ type AiAssistantProps = {
   messageId?: number
   messageSubject?: string
   onChat: (input: AiChatInput) => Promise<AiChatResult>
+  openRequest?: { messageId: number; subject: string; token: number }
 }
 
 export function AiAssistant({
@@ -30,7 +31,8 @@ export function AiAssistant({
   launcherHidden = false,
   messageId,
   messageSubject,
-  onChat
+  onChat,
+  openRequest
 }: AiAssistantProps): React.JSX.Element {
   const { t } = useI18n()
   const [open, setOpen] = React.useState(false)
@@ -54,6 +56,17 @@ export function AiAssistant({
     setPending(false)
     setError(null)
   }, [messageId, settings.baseUrl, settings.model, settings.verifiedAt])
+
+  React.useEffect(() => {
+    if (!openRequest) return
+    requestTokenRef.current += 1
+    setMessages([])
+    setDraft('')
+    setError(null)
+    setPending(false)
+    setAttachCurrentMessage(true)
+    setOpen(true)
+  }, [openRequest?.token])
 
   React.useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: 'nearest' })

@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   ChevronRight,
   Edit3,
-  Inbox,
   Plus,
   RefreshCw,
   Trash2
@@ -206,11 +205,12 @@ function AccountRow({
         type="button"
         onClick={handleSelect}
         className={cn(
-          'grid min-w-0 grid-cols-[24px_minmax(0,1fr)] items-center gap-1 text-left outline-none',
+          'grid min-w-0 items-center text-left outline-none',
+          account.id !== 'all' && 'grid-cols-[24px_minmax(0,1fr)] gap-1',
           warning && 'text-warning'
         )}
       >
-        <ProviderLogo account={account} selected={selected} warning={Boolean(warning)} />
+        {account.id !== 'all' && <ProviderLogo account={account} selected={selected} warning={Boolean(warning)} />}
         <span className="min-w-0 truncate font-medium">
           {syncing ? (
             <SweepShine>{getAccountDisplayName(account, t)}</SweepShine>
@@ -231,7 +231,7 @@ function AccountRow({
             {account.unread}
           </Badge>
         )}
-        <button
+        {!warning && connectionStatus !== 'reauthorize' && <button
           type="button"
           aria-label={t('account.list.refreshAccount')}
           className={cn(
@@ -244,7 +244,7 @@ function AccountRow({
           }}
         >
           <RefreshCw aria-hidden="true" strokeWidth={2} className={cn((syncing || spinRequested) && 'animate-spin [animation-duration:800ms] motion-reduce:animate-none')} />
-        </button>
+        </button>}
         <AccountStatusIndicator
           status={connectionStatus}
           warning={Boolean(warning)}
@@ -296,7 +296,6 @@ function ProviderLogo({
   selected: boolean
   warning?: boolean
 }): React.JSX.Element {
-  const isUnifiedInbox = account.id === 'all'
   const logo = getProviderLogoMetadata(account.providerKey, account.address)
   const providerKey = normalizeProviderKey(account.providerKey)
   const imageIcon = PROVIDER_IMAGE_ICONS[providerKey]
@@ -305,14 +304,11 @@ function ProviderLogo({
     <span
       className={cn(
         'flex size-5 shrink-0 items-center justify-center overflow-hidden rounded-md bg-white/55 text-muted-foreground shadow-[inset_0_0_0_1px_rgb(0_0_0/0.04)] dark:bg-white/8 [&_img]:size-4 [&_img]:object-contain [&_svg]:size-[17px]',
-        isUnifiedInbox && 'bg-transparent text-primary shadow-none',
         warning && 'text-warning-foreground',
-        selected && !isUnifiedInbox && 'text-foreground'
+        selected && 'text-foreground'
       )}
     >
-      {isUnifiedInbox ? (
-        <Inbox aria-hidden="true" strokeWidth={1.8} />
-      ) : imageIcon ? (
+      {imageIcon ? (
         <img src={imageIcon} alt="" aria-hidden="true" />
       ) : (
         <span className="text-[10px] font-semibold leading-none" aria-hidden="true">
@@ -365,6 +361,9 @@ function groupAccountsByProvider(
   t: (key: TranslationKey) => string
 ): AccountGroup[] {
   const groups = new Map<string, Account[]>()
+  const latestInGroup = (group: Account[]) => group.reduce(
+    (latest, account) => Math.max(latest, account.latestMessageAt ?? 0), 0
+  )
 
   for (const account of accounts) {
     const key = normalizeProviderKey(account.providerKey)
@@ -372,11 +371,16 @@ function groupAccountsByProvider(
   }
 
   return Array.from(groups.entries())
-    .sort(([first], [second]) => first.localeCompare(second))
+    .sort(([firstKey, firstAccounts], [secondKey, secondAccounts]) =>
+      latestInGroup(secondAccounts) - latestInGroup(firstAccounts) ||
+      firstKey.localeCompare(secondKey)
+    )
     .map(([key, groupAccounts]) => ({
       key,
       label: getProviderLabel(key, t),
-      accounts: groupAccounts.sort((first, second) => first.address.localeCompare(second.address))
+      accounts: groupAccounts.sort((first, second) =>
+        (second.latestMessageAt ?? 0) - (first.latestMessageAt ?? 0) || first.address.localeCompare(second.address)
+      )
     }))
 }
 

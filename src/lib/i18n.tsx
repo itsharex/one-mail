@@ -5,6 +5,8 @@ import { enUSCommonSettings } from './i18n/en-us-common-settings'
 import { enUSAccounts } from './i18n/en-us-accounts'
 import { enUSMailAndStatus } from './i18n/en-us-mail-and-status'
 import * as React from 'react'
+import { listen } from '@tauri-apps/api/event'
+import type { AppSettings } from '@renderer/shared/types'
 
 export const supportedLocales = ['zh-CN', 'en-US'] as const
 export type AppLocale = (typeof supportedLocales)[number]
@@ -54,6 +56,21 @@ export function I18nProvider({
   React.useEffect(() => {
     document.documentElement.lang = locale
   }, [locale])
+
+  React.useEffect(() => {
+    let active = true
+    let changed = false
+    let stop: (() => void) | undefined
+    void listen<AppSettings>('settings/changed', (event) => {
+      changed = true
+      if (active) setLocale(normalizeLocale(event.payload.locale))
+    }).then((unlisten) => { if (active) stop = unlisten; else unlisten() })
+      .catch((error) => console.warn('Failed to subscribe to language changes.', error))
+    void window.api.settings.get()
+      .then((settings) => { if (active && !changed) setLocale(normalizeLocale(settings.locale)) })
+      .catch((error) => console.warn('Failed to load the app language.', error))
+    return () => { active = false; stop?.() }
+  }, [setLocale])
 
   const value = React.useMemo<I18nContextValue>(
     () => ({

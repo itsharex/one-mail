@@ -41,6 +41,7 @@ export type AccountMailboxStats = {
   accountId: number
   totalCount: number
   unreadCount: number
+  latestMessageAt?: number | null
 }
 
 export type MailMessageAttachment = {

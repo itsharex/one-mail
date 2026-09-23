@@ -72,6 +72,7 @@ export function BackupSyncConfigDialog({
   return (
     <ResponsiveDialog
       open={open}
+      forceDialog={'__TAURI_INTERNALS__' in window}
       onOpenChange={(nextOpen) => {
         if (!busy) onOpenChange(nextOpen)
       }}

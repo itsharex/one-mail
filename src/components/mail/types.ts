@@ -9,6 +9,7 @@ export type Account = {
   address: string
   unread: number
   messageCount?: number
+  latestMessageAt?: number | null
   status: string
   connectionStatus?: AccountConnectionStatus
   credentialState?: string

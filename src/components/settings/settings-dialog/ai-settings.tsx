@@ -2,12 +2,12 @@ import { Bot, CheckCircle2, ShieldCheck, Trash2 } from 'lucide-react'
 import * as React from 'react'
 import { SweepShine } from '@renderer/components/sweep-shine'
 import { Button } from '@renderer/components/ui/button'
-import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@renderer/components/ui/field'
+import { Field, FieldError, FieldGroup, FieldLabel } from '@renderer/components/ui/field'
 import { Input } from '@renderer/components/ui/input'
 import { Alert, AlertTitle } from '@renderer/components/ui/alert'
 import type{ AiSettings, AiSettingsInput } from '@renderer/shared/types'
 import { useI18n } from '@renderer/lib/i18n'
-import { SettingsGroup, SETTINGS_LIST_CLASS } from './settings-ui'
+import { SettingsGroup, SettingsHelp, SETTINGS_LIST_CLASS } from './settings-ui'
 
 export function AiSettingsForm({
   settings,
@@ -124,15 +124,14 @@ export function AiSettingsForm({
       : t('settings.ai.apiKeyDescription')
 
   return (
-    <form className="flex min-h-full w-full flex-col gap-3 p-3 sm:p-4" onSubmit={handleVerify}>
+    <form className="flex w-full flex-col gap-3" onSubmit={handleVerify}>
       <SettingsGroup title={t('settings.ai.connectionGroup')}>
         <FieldGroup className={SETTINGS_LIST_CLASS}>
-          <Field className="gap-1.5 px-3 py-2.5">
-            <FieldLabel htmlFor="ai-base-url" className="text-xs font-medium">
-              {t('settings.ai.baseUrl')}
-            </FieldLabel>
+          <Field orientation="horizontal" className="min-h-10 items-center gap-2 px-3 py-1.5">
+            <div className="flex min-w-28 shrink-0 items-center gap-1"><FieldLabel htmlFor="ai-base-url" className="text-xs font-medium">{t('settings.ai.baseUrl')}</FieldLabel><SettingsHelp description={t('settings.ai.baseUrlDescription')} /></div>
             <Input
               id="ai-base-url"
+              className="h-8 min-w-0 flex-1 text-xs"
               type="url"
               value={baseUrl}
               disabled={Boolean(pending)}
@@ -144,17 +143,13 @@ export function AiSettingsForm({
                 setFormError(null)
               }}
             />
-            <FieldDescription className="text-xs">
-              {t('settings.ai.baseUrlDescription')}
-            </FieldDescription>
           </Field>
 
-          <Field className="gap-1.5 px-3 py-2.5">
-            <FieldLabel htmlFor="ai-model" className="text-xs font-medium">
-              {t('settings.ai.model')}
-            </FieldLabel>
+          <Field orientation="horizontal" className="min-h-10 items-center gap-2 px-3 py-1.5">
+            <div className="flex min-w-28 shrink-0 items-center gap-1"><FieldLabel htmlFor="ai-model" className="text-xs font-medium">{t('settings.ai.model')}</FieldLabel><SettingsHelp description={t('settings.ai.modelDescription')} /></div>
             <Input
               id="ai-model"
+              className="h-8 min-w-0 flex-1 text-xs"
               value={model}
               disabled={Boolean(pending)}
               placeholder="model-name"
@@ -165,17 +160,13 @@ export function AiSettingsForm({
                 setFormError(null)
               }}
             />
-            <FieldDescription className="text-xs">
-              {t('settings.ai.modelDescription')}
-            </FieldDescription>
           </Field>
 
-          <Field className="gap-1.5 px-3 py-2.5">
-            <FieldLabel htmlFor="ai-api-key" className="text-xs font-medium">
-              {t('settings.ai.apiKey')}
-            </FieldLabel>
+          <Field orientation="horizontal" className="min-h-10 items-center gap-2 px-3 py-1.5">
+            <div className="flex min-w-28 shrink-0 items-center gap-1"><FieldLabel htmlFor="ai-api-key" className="text-xs font-medium">{t('settings.ai.apiKey')}</FieldLabel><SettingsHelp description={apiKeyDescription} /></div>
             <Input
               id="ai-api-key"
+              className="h-8 min-w-0 flex-1 text-xs"
               type="password"
               value={apiKey}
               disabled={Boolean(pending) || loopbackService}
@@ -187,45 +178,34 @@ export function AiSettingsForm({
                 setFormError(null)
               }}
             />
-            <FieldDescription className="text-xs">
-              {apiKeyDescription}
-            </FieldDescription>
           </Field>
         </FieldGroup>
       </SettingsGroup>
 
       <SettingsGroup title={t('settings.ai.statusGroup')}>
-        <div className={`${SETTINGS_LIST_CLASS} flex min-h-12 items-center gap-2.5 px-3 py-2.5`}>
+        <div className={`${SETTINGS_LIST_CLASS} flex min-h-10 items-center gap-2.5 px-3 py-1.5`}>
           <div
-            className={`flex size-7 shrink-0 items-center justify-center rounded-md text-white shadow-sm ${
-              verified ? 'bg-emerald-500' : 'bg-muted-foreground'
-            }`}
+            className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted/70 text-muted-foreground"
           >
             {verified ? <CheckCircle2 className="size-3.5" /> : <Bot className="size-3.5" />}
           </div>
-          <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
             <div className="text-xs font-medium">
               {verified ? t('settings.ai.statusVerified') : t('settings.ai.statusNotVerified')}
             </div>
-            <div className="text-xs leading-tight text-muted-foreground">
-              {verified && settings?.verifiedAt
-                ? t('settings.ai.verifiedAt', { time: formatAiVerifiedAt(settings.verifiedAt) })
-                : t('settings.ai.statusDescription')}
-            </div>
+            {verified && settings?.verifiedAt ? <span className="truncate text-xs text-muted-foreground">{t('settings.ai.verifiedAt', { time: formatAiVerifiedAt(settings.verifiedAt) })}</span> : <SettingsHelp description={t('settings.ai.statusDescription')} />}
           </div>
         </div>
       </SettingsGroup>
 
       <SettingsGroup title={t('settings.ai.privacyGroup')}>
-        <div className={`${SETTINGS_LIST_CLASS} flex min-h-12 items-center gap-2.5 px-3 py-2.5`}>
-          <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-orange-500 text-white shadow-sm">
+        <div className={`${SETTINGS_LIST_CLASS} flex min-h-10 items-center gap-2.5 px-3 py-1.5`}>
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted/70 text-muted-foreground">
             <ShieldCheck className="size-3.5" aria-hidden="true" />
           </div>
-          <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-1.5">
             <div className="text-xs font-medium">{t('settings.ai.privacyTitle')}</div>
-            <div className="text-xs leading-tight text-muted-foreground">
-              {t('settings.ai.privacyDescription')}
-            </div>
+            <SettingsHelp description={t('settings.ai.privacyDescription')} />
           </div>
         </div>
       </SettingsGroup>

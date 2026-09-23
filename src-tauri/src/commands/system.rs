@@ -1,17 +1,20 @@
 use std::{path::Path, process::Command};
 #[cfg(target_os = "macos")]
 use std::{io::{BufRead, BufReader, Write}, process::Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{atomic::{AtomicU64, Ordering}, Mutex, OnceLock};
 
 use serde_json::{json, Value};
+use rusqlite::OptionalExtension;
 use tauri::{AppHandle, Emitter, Manager, State, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-use crate::state::AppState;
+use crate::{client_log, db, state::AppState};
 
-static PENDING_NOTIFICATION_MESSAGE: OnceLock<Mutex<Option<i64>>> = OnceLock::new();
+static PENDING_NOTIFICATION_MESSAGE: OnceLock<Mutex<Option<Value>>> = OnceLock::new();
+static APP_THEME: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static NEXT_NOTIFICATION_CLICK_ID: AtomicU64 = AtomicU64::new(1);
 const GMAIL_ICON_URL: &str = "https://upload.wikimedia.org/wikipedia/commons/2/2e/Gmail_2020.png";
 
-fn pending_notification_message() -> &'static Mutex<Option<i64>> {
+fn pending_notification_message() -> &'static Mutex<Option<Value>> {
     PENDING_NOTIFICATION_MESSAGE.get_or_init(|| Mutex::new(None))
 }
 
@@ -22,7 +25,8 @@ pub fn message_id_from_args(args: &[String]) -> Option<i64> {
 
 #[cfg(test)]
 mod notification_tests {
-    use super::message_id_from_args;
+    use super::{message_id_from_args, new_mail_notification_content, queue_notification_message, system_take_notification_message};
+    use serde_json::json;
 
     #[test]
     fn notification_click_requires_a_positive_message_id() {
@@ -30,21 +34,51 @@ mod notification_tests {
         assert_eq!(message_id_from_args(&["onemail".into(), "--open-message".into(), "0".into()]), None);
         assert_eq!(message_id_from_args(&["onemail".into(), "--open-message".into()]), None);
     }
-}
 
-pub fn queue_notification_message(message_id: i64) {
-    if let Ok(mut pending) = pending_notification_message().lock() {
-        *pending = Some(message_id);
+    #[test]
+    fn pending_click_is_consumed_once_and_has_a_unique_id() {
+        let first = queue_notification_message(42);
+        let second = queue_notification_message(42);
+        assert_ne!(first["clickId"], second["clickId"]);
+        assert_eq!(system_take_notification_message(), Some(second));
+        assert_eq!(system_take_notification_message(), None);
+    }
+
+    #[test]
+    fn native_new_mail_content_targets_the_newest_message() {
+        let notification = json!({
+            "messageCount": 2,
+            "messages": [
+                { "messageId": 10, "fromName": "Alice", "subject": "First", "receivedAt": "2026-09-23T00:00:00Z" },
+                { "messageId": 11, "fromEmail": "bob@example.com", "subject": "Second", "receivedAt": "2026-09-23T00:01:00Z" }
+            ]
+        });
+        let (title, body, message_id) = new_mail_notification_content(&notification, true).unwrap();
+        assert_eq!(title, "2 new emails");
+        assert!(body.contains("Alice：First"));
+        assert_eq!(message_id, Some(11));
     }
 }
 
+pub fn queue_notification_message(message_id: i64) -> Value {
+    let click = json!({
+        "clickId": NEXT_NOTIFICATION_CLICK_ID.fetch_add(1, Ordering::Relaxed),
+        "messageId": message_id
+    });
+    if let Ok(mut pending) = pending_notification_message().lock() {
+        *pending = Some(click.clone());
+    }
+    click
+}
+
 pub fn open_notification_message(app: &AppHandle, message_id: i64) {
-    queue_notification_message(message_id);
-    let _ = app.emit("notifications/openMessage", message_id);
+    let click = queue_notification_message(message_id);
+    crate::background::show_main_window(app);
+    let _ = app.emit("notifications/openMessage", click);
 }
 
 #[tauri::command]
-pub fn system_take_notification_message() -> Option<i64> {
+pub fn system_take_notification_message() -> Option<Value> {
     pending_notification_message().lock().ok()?.take()
 }
 
@@ -101,15 +135,48 @@ pub fn system_set_title_bar_theme(window: WebviewWindow, theme: String) -> Resul
         "dark" => Theme::Dark,
         _ => return Ok(false),
     };
-    window
-        .set_theme(Some(next_theme))
-        .map_err(|error| format!("更新窗口主题失败：{error}"))?;
+    let app = window.app_handle();
+    for current in app.webview_windows().values() {
+        current.set_theme(Some(next_theme))
+            .map_err(|error| format!("更新窗口主题失败：{error}"))?;
+    }
+    *APP_THEME.get_or_init(|| Mutex::new(None)).lock()
+        .map_err(|_| "读取窗口主题失败。".to_string())? = Some(theme.clone());
+    let _ = app.emit("appearance/themeChanged", theme);
     Ok(true)
+}
+
+#[tauri::command]
+pub fn system_get_theme() -> Result<Option<String>, String> {
+    Ok(APP_THEME.get_or_init(|| Mutex::new(None)).lock()
+        .map_err(|_| "读取窗口主题失败。".to_string())?.clone())
 }
 
 #[tauri::command]
 pub fn system_reveal_database(state: State<'_, AppState>) -> Result<bool, String> {
     reveal_path(&state.database_path)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn system_reveal_logs(app: AppHandle) -> Result<bool, String> {
+    client_log::reveal(&app)
+}
+
+#[tauri::command]
+pub fn system_reload_client(app: AppHandle) -> Result<bool, String> {
+    let window = app.get_webview_window("main").ok_or("主窗口不可用。")?;
+    client_log::write(&app, "INFO Client reloaded")?;
+    window.reload().map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn system_open_devtools(app: AppHandle) -> Result<bool, String> {
+    let window = app.get_webview_window("main").ok_or("主窗口不可用。")?;
+    client_log::write(&app, "INFO Developer tools opened")?;
+    window.open_devtools();
+    window.set_focus().map_err(|error| error.to_string())?;
     Ok(true)
 }
 
@@ -190,6 +257,51 @@ pub async fn system_send_notification(
     .map_err(|error| error.to_string())?
 }
 
+pub(crate) async fn send_new_mail_notification(app: &AppHandle, notification: &Value) -> Result<(), String> {
+    let account_id = notification["accountId"].as_i64().ok_or("新邮件通知缺少账号")?;
+    let connection = db::open(app.state::<AppState>().inner())?;
+    let locale = connection.query_row(
+        "SELECT setting_value FROM onemail_app_settings WHERE setting_key='locale'",
+        [], |row| row.get::<_, String>(0),
+    ).optional().map_err(|error| error.to_string())?.unwrap_or_else(|| "zh-CN".to_owned());
+    let provider_key = connection.query_row(
+        "SELECT provider_key FROM onemail_mail_accounts WHERE account_id=?1",
+        [account_id], |row| row.get::<_, String>(0),
+    ).optional().map_err(|error| error.to_string())?;
+    let english = locale.to_ascii_lowercase().starts_with("en");
+    let (title, body, message_id) = new_mail_notification_content(notification, english)?;
+    let sound = if cfg!(target_os = "macos") { "Ping" } else if cfg!(target_os = "windows") { "Mail" } else { "message-new-instant" };
+    system_send_notification(
+        app.clone(), title, body, Some(sound.to_owned()), message_id, provider_key,
+    ).await
+}
+
+fn new_mail_notification_content(notification: &Value, english: bool) -> Result<(String, String, Option<i64>), String> {
+    let messages = notification["messages"].as_array().ok_or("新邮件通知缺少邮件")?;
+    let first = messages.iter().max_by_key(|message| message["receivedAt"].as_str()).ok_or("新邮件通知为空")?;
+    let sender = first["fromName"].as_str().filter(|value| !value.trim().is_empty())
+        .or_else(|| first["fromEmail"].as_str().filter(|value| !value.trim().is_empty()))
+        .unwrap_or(if english { "Unknown sender" } else { "未知发件人" });
+    let subject = first["subject"].as_str().filter(|value| !value.trim().is_empty())
+        .unwrap_or(if english { "No subject" } else { "无主题" });
+    let count = notification["messageCount"].as_u64().unwrap_or(messages.len() as u64);
+    let (title, body) = if count == 1 {
+        (sender.to_owned(), subject.to_owned())
+    } else {
+        let title = if english { format!("{count} new emails") } else { format!("{count} 封新邮件") };
+        let body = messages.iter().take(3).map(|message| {
+            let sender = message["fromName"].as_str().filter(|value| !value.trim().is_empty())
+                .or_else(|| message["fromEmail"].as_str().filter(|value| !value.trim().is_empty()))
+                .unwrap_or(if english { "Unknown sender" } else { "未知发件人" });
+            let subject = message["subject"].as_str().filter(|value| !value.trim().is_empty())
+                .unwrap_or(if english { "No subject" } else { "无主题" });
+            format!("{sender}：{subject}")
+        }).collect::<Vec<_>>().join("\n");
+        (title, body)
+    };
+    Ok((title, body, first["messageId"].as_i64()))
+}
+
 #[cfg(target_os = "macos")]
 fn send_mac_notification(
     title: &str,
@@ -264,6 +376,62 @@ pub fn accounts_open_add_window(app: AppHandle) -> Result<bool, String> {
     .center()
     .build()
     .map_err(|error| format!("创建添加账号窗口失败：{error}"))?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn settings_open_window(app: AppHandle, section: Option<String>) -> Result<bool, String> {
+    let section = match section.as_deref() {
+        Some("about") => "about",
+        _ => "general",
+    };
+    if let Some(window) = app.get_webview_window("settings") {
+        window.show().and_then(|_| window.set_focus())
+            .map_err(|error| format!("打开设置窗口失败：{error}"))?;
+        app.emit_to("settings", "settings/showSection", section)
+            .map_err(|error| error.to_string())?;
+        return Ok(true);
+    }
+    WebviewWindowBuilder::new(
+        &app,
+        "settings",
+        WebviewUrl::App(format!("index.html#/settings?section={section}").into()),
+    )
+    .title("设置 - OneMail")
+    .inner_size(720.0, 540.0)
+    .min_inner_size(640.0, 480.0)
+    .center()
+    .build()
+    .map_err(|error| format!("创建设置窗口失败：{error}"))?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn settings_close_window(app: AppHandle) -> Result<bool, String> {
+    if let Some(window) = app.get_webview_window("settings") {
+        window.close().map_err(|error| format!("关闭设置窗口失败：{error}"))?;
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn original_message_open_window(app: AppHandle) -> Result<bool, String> {
+    if let Some(window) = app.get_webview_window("original-message") {
+        window.show().and_then(|_| window.set_focus())
+            .map_err(|error| format!("打开邮件原文窗口失败：{error}"))?;
+        return Ok(true);
+    }
+    WebviewWindowBuilder::new(
+        &app,
+        "original-message",
+        WebviewUrl::App("index.html#/original-message".into()),
+    )
+    .title("邮件原文 - OneMail")
+    .inner_size(960.0, 740.0)
+    .min_inner_size(620.0, 480.0)
+    .center()
+    .build()
+    .map_err(|error| format!("创建邮件原文窗口失败：{error}"))?;
     Ok(true)
 }
 

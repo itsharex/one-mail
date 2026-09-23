@@ -10,31 +10,6 @@ export function getErrorMessage(error: unknown, fallback: string): string {
   return fallback
 }
 
-export function shouldShowOutlookImapHelp(message: string, account?: Account | null): boolean {
-  if (account?.providerKey && normalizeProviderKey(account.providerKey) !== 'outlook') return false
-  return /IMAP OAuth 登录认证失败|AUTHENTICATE failed|User is authenticated but not connected|authenticated but not connected/i.test(
-    message
-  )
-}
-
-export function createOutlookHelpAccount(accountId: number, email: string): Account {
-  return {
-    id: String(accountId),
-    accountId,
-    providerKey: 'outlook',
-    name: email,
-    address: email,
-    unread: 0,
-    status: 'auth_error',
-    lastError: 'Outlook IMAP authentication failed.',
-    accent: 'bg-muted-foreground'
-  }
-}
-
-export function shouldEditCredential(message: string): boolean {
-  return /凭据不存在|凭据格式无效|凭据解密失败|重新保存密码/.test(message)
-}
-
 export function getNextSelectedAccountId(
   accounts: Account[],
   removedAccountId: string,
@@ -60,10 +35,4 @@ export function getFallbackAccount(): Account {
     status: 'empty',
     accent: 'bg-primary'
   }
-}
-
-function normalizeProviderKey(providerKey: string): string {
-  const normalized = providerKey.toLowerCase()
-  if (normalized.includes('outlook') || normalized.includes('microsoft')) return 'outlook'
-  return normalized
 }

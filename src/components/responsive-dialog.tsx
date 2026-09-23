@@ -33,6 +33,7 @@ function useMediaQuery(query: string): boolean {
 
 type ResponsiveDialogProps = {
   open: boolean
+  forceDialog?: boolean
   onOpenChange: (open: boolean) => void
   title: string
   description?: string
@@ -46,6 +47,7 @@ type ResponsiveDialogProps = {
 
 function ResponsiveDialog({
   open,
+  forceDialog = false,
   onOpenChange,
   title,
   description,
@@ -58,7 +60,7 @@ function ResponsiveDialog({
 }: ResponsiveDialogProps): React.JSX.Element {
   const isDesktop = useMediaQuery('(min-width: 768px)')
 
-  if (isDesktop) {
+  if (isDesktop || forceDialog) {
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className={contentClassName}>

@@ -1,5 +1,14 @@
 import * as React from 'react'
-import { Field, FieldContent, FieldDescription, FieldError, FieldLabel } from '@renderer/components/ui/field'
+import { CircleHelp } from 'lucide-react'
+import { Field, FieldError, FieldLabel } from '@renderer/components/ui/field'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@renderer/components/ui/tooltip'
+
+export function SettingsHelp({ description, focusable = true }: { description: string; focusable?: boolean }): React.JSX.Element {
+  return <TooltipProvider><Tooltip>
+    <TooltipTrigger asChild><span tabIndex={focusable ? 0 : undefined} role="img" aria-label={description} onClick={(event) => event.stopPropagation()} className="inline-flex size-4 shrink-0 cursor-help items-center justify-center rounded-full text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"><CircleHelp className="size-3.5" aria-hidden="true" /></span></TooltipTrigger>
+    <TooltipContent side="top" className="max-w-64 leading-5">{description}</TooltipContent>
+  </Tooltip></TooltipProvider>
+}
 
 export function SettingsGroup({
   title,
@@ -10,8 +19,8 @@ export function SettingsGroup({
 }): React.JSX.Element {
   return (
     <section className="grid gap-1.5">
-      <div className="flex min-h-5 items-center gap-2 px-1">
-        <h3 className="text-[11px] font-medium text-muted-foreground">{title}</h3>
+      <div className="px-0.5">
+        <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
       </div>
       {children}
     </section>
@@ -20,7 +29,6 @@ export function SettingsGroup({
 
 export function SettingRow({
   icon: Icon,
-  iconClassName,
   title,
   description,
   control,
@@ -28,7 +36,6 @@ export function SettingRow({
   invalid = false
 }: {
   icon: React.ComponentType<React.SVGProps<SVGSVGElement>>
-  iconClassName: string
   title: string
   description: React.ReactNode
   control?: React.ReactNode
@@ -37,26 +44,26 @@ export function SettingRow({
 }): React.JSX.Element {
   return (
     <Field data-invalid={invalid || undefined}>
-      <div className="grid min-h-12 gap-2 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-        <div className="flex min-w-0 gap-2.5">
+      <div className="grid min-h-10 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-1.5">
+        <div className="flex min-w-0 items-center gap-2.5">
           <div
-            className={`mt-px flex size-7 shrink-0 items-center justify-center rounded-md text-white shadow-sm [&_svg]:size-3.5 ${iconClassName}`}
+            className="flex size-6 shrink-0 items-center justify-center rounded-md bg-muted/70 text-muted-foreground [&_svg]:size-3.5"
           >
             <Icon aria-hidden="true" />
           </div>
-          <FieldContent>
-            <FieldLabel className="text-xs font-medium">{title}</FieldLabel>
-            <FieldDescription className="text-xs leading-tight">{description}</FieldDescription>
-            <FieldError className="text-xs">{error}</FieldError>
-          </FieldContent>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+            <FieldLabel className="text-[13px] font-medium">{title}</FieldLabel>
+            {typeof description === 'string' ? <SettingsHelp description={description} /> : <span className="text-[11px] text-muted-foreground">{description}</span>}
+            <FieldError className="basis-full text-xs">{error}</FieldError>
+          </div>
         </div>
-        {control ? <div className="flex justify-start sm:justify-end">{control}</div> : null}
+        {control ? <div className="flex justify-end">{control}</div> : null}
       </div>
     </Field>
   )
 }
 
 export const SETTINGS_LIST_CLASS =
-  'gap-0 overflow-hidden rounded-lg bg-background shadow-sm ring-1 ring-black/5 dark:ring-white/8 [&>[data-slot=field]+[data-slot=field]]:border-t [&>[data-slot=field]+[data-slot=field]]:border-border/60'
+  'gap-0 overflow-hidden rounded-lg bg-background [&>[data-slot=field]+[data-slot=field]]:border-t [&>[data-slot=field]+[data-slot=field]]:border-border/40'
 
 // eslint-disable-next-line @typescript-eslint/explicit-function-return-type

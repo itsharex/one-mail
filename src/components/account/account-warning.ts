@@ -28,8 +28,7 @@ export function getAccountWarning(account: Account, t: Translate): AccountWarnin
   const isOAuthAccount = account.authType === 'oauth2'
   const needsOAuthReauthorization =
     isOAuthAccount &&
-    (account.connectionStatus === 'reauthorize' ||
-      (lastError ? isMicrosoftReauthorizationError(lastError) : false))
+    account.connectionStatus === 'reauthorize'
 
   if (isOAuthAccount && lastError && isMicrosoftImapAccessError(lastError)) {
     return withTooltip(t, {
@@ -38,15 +37,7 @@ export function getAccountWarning(account: Account, t: Translate): AccountWarnin
       message: t('account.warning.outlookImapAccessMessage'),
       primaryAction: 'retry',
       primaryLabel: t('account.warning.resync'),
-      secondaryAction: 'reauthorize',
-      secondaryLabel: t('account.warning.primaryReauthorize'),
-      steps: [
-        t('account.outlookImapHelp.step1'),
-        t('account.outlookImapHelp.step2'),
-        t('account.outlookImapHelp.step3'),
-        t('account.outlookImapHelp.step4'),
-        t('account.outlookImapHelp.step5')
-      ]
+      steps: [t('account.warning.outlookImapAction'), t('account.warning.outlookImapActivity')]
     })
   }
 
@@ -80,7 +71,7 @@ export function getAccountWarning(account: Account, t: Translate): AccountWarnin
     })
   }
 
-  if (status === 'syncing') return null
+  if (status === 'active' || status === 'syncing') return null
 
   if (status === 'network_error') {
     return withTooltip(t, {
@@ -106,13 +97,17 @@ export function getAccountWarning(account: Account, t: Translate): AccountWarnin
       message: lastError || t('account.warning.syncMessage'),
       primaryAction: 'retry',
       primaryLabel: t('account.warning.resync'),
-      secondaryAction: 'edit',
-      secondaryLabel: t('account.warning.checkConfig'),
-      steps: [
-        t('account.warning.syncStep1'),
-        t('account.warning.syncStep2'),
-        t('account.warning.syncStep3')
-      ]
+      secondaryAction: isOAuthAccount ? 'reauthorize' : 'edit',
+      secondaryLabel: isOAuthAccount
+        ? t('account.warning.primaryReauthorize')
+        : t('account.warning.checkConfig'),
+      steps: isOAuthAccount
+        ? [t('account.warning.syncStep1'), t('account.warning.syncOAuthStep2')]
+        : [
+            t('account.warning.syncStep1'),
+            t('account.warning.syncStep2'),
+            t('account.warning.syncStep3')
+          ]
     })
   }
 

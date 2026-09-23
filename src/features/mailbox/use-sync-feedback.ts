@@ -7,6 +7,9 @@ export type SyncNotice = {
   startedAt?: Date
   finishedAt?: Date
   message?: string
+  progress?: { completed: number; total: number }
+  activity?: { account: string; stage: string; folder?: string | null }
+  steps?: { account: string; stage: string; folder?: string | null }[]
 }
 
 type SyncFeedback = {
@@ -43,11 +46,13 @@ export function useSyncFeedback(): SyncFeedback {
       state: Extract<SyncNotice['state'], 'success' | 'error'>,
       notice: Omit<SyncNotice, 'state' | 'finishedAt'>
     ): void => {
-      setNotice({
+      setNotice((current) => ({
         ...notice,
+        activity: current.startedAt === notice.startedAt ? current.activity : undefined,
+        steps: current.startedAt === notice.startedAt ? current.steps : undefined,
         state,
         finishedAt: new Date()
-      })
+      }))
       setSyncingAccountIds((current) => {
         const next = new Set(current)
         next.delete(accountId)
@@ -81,12 +86,9 @@ export function formatSyncNotice(
 ): string {
   if (notice.state === 'idle') return ''
   if (notice.state === 'running') return notice.message ?? t?.('sync.running') ?? 'Syncing...'
+  if (notice.state === 'error') return notice.message ?? t?.('sync.error') ?? 'Sync failed'
 
-  const message =
-    notice.message ??
-    (notice.state === 'success'
-      ? (t?.('sync.success') ?? 'Sync complete')
-      : (t?.('sync.error') ?? 'Sync failed'))
+  const message = notice.message ?? t?.('sync.success') ?? 'Sync complete'
   const elapsedSeconds =
     notice.startedAt && notice.finishedAt
       ? Math.max(1, Math.round((notice.finishedAt.getTime() - notice.startedAt.getTime()) / 1000))

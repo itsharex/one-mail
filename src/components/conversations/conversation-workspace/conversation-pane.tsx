@@ -1,8 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { gsap } from "gsap";
 import { formatAbsoluteTime, formatRelativeTime } from "@renderer/components/mail/date-format";
-import { ArrowLeft, Loader2, Reply } from "lucide-react";
+import { ArrowLeft, FileText, Reply, Sparkles, Users } from "lucide-react";
 import { Button } from "@renderer/components/ui/button";
+import { Skeleton } from "@renderer/components/ui/skeleton";
+import { CopyableText } from "@renderer/components/ui/copyable-text";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -28,12 +30,15 @@ export function ConversationPane({
   focusedMessageId,
   accounts,
   loading,
+  loadingOlder,
   error,
   hasOlder,
   loadOlder,
   onBack,
   onOpenOutbox,
+  onOpenOriginal,
   refresh,
+  onAskAi,
 }: {
   settings: AppSettings | null;
   conversation: ConversationSummary;
@@ -41,12 +46,15 @@ export function ConversationPane({
   focusedMessageId: number | null;
   accounts: Account[];
   loading: boolean;
+  loadingOlder: boolean;
   error: string;
   hasOlder: boolean;
   loadOlder: () => void;
   onBack: () => void;
   onOpenOutbox: () => void;
+  onOpenOriginal: (message: ConversationMessage) => void;
   refresh: () => void;
+  onAskAi?: (message: ConversationMessage) => void;
 }) {
   const { locale } = useI18n();
   const text = (cn: string, en: string) => (locale === "zh-CN" ? cn : en);
@@ -70,7 +78,7 @@ export function ConversationPane({
   const [newAccountId, setNewAccountId] = useState<number | undefined>(
     conversation.lastMessage.accountId,
   );
-  const bottom = useRef<HTMLDivElement>(null);
+  const scrollArea = useRef<HTMLDivElement>(null);
   const paneRef = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
     if (
@@ -94,15 +102,20 @@ export function ConversationPane({
     return () => context.revert();
   }, []);
   const latestId = messages[0]?.id;
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ block: "end" });
-  }, [latestId]);
-  useEffect(() => {
-    if (!focusedMessageId) return;
-    paneRef.current
-      ?.querySelector(`[data-message-id="${focusedMessageId}"]`)
-      ?.scrollIntoView({ block: "center" });
-  }, [focusedMessageId, messages]);
+  const focusedMessageLoaded = messages.some((message) => message.messageId === focusedMessageId);
+  useLayoutEffect(() => {
+    const area = scrollArea.current;
+    if (area && latestId && !focusedMessageId) area.scrollTop = area.scrollHeight;
+  }, [latestId, focusedMessageId]);
+  useLayoutEffect(() => {
+    const area = scrollArea.current;
+    if (!area || !focusedMessageId || !focusedMessageLoaded) return;
+    const target = area.querySelector(`[data-message-id="${focusedMessageId}"]`);
+    if (!target) return;
+    const areaRect = area.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    area.scrollTop += targetRect.top - areaRect.top - (areaRect.height - targetRect.height) / 2;
+  }, [focusedMessageId, focusedMessageLoaded]);
   useEffect(() => {
     let cancelled = false;
     setDraft(null);
@@ -217,6 +230,7 @@ export function ConversationPane({
   }
 
   const chronological = [...messages].reverse();
+  const participantEmails = conversation.participants.map((person) => person.email).join(', ');
   return (
     <section
       ref={paneRef}
@@ -235,38 +249,40 @@ export function ConversationPane({
         >
           <ArrowLeft className="size-4" />
         </Button>
-        <button
-          type="button"
-          className="app-no-drag line-clamp-2 min-w-0 flex-1 break-words text-left text-sm font-semibold leading-5 outline-none hover:text-primary focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring"
-          title={conversation.displayName}
-          aria-label={text("查看参与者", "View participants")}
+        <CopyableText value={participantEmails} className="min-w-0 flex-1 text-sm font-semibold leading-5" />
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="app-no-drag shrink-0"
           onClick={() => setParticipantsOpen(true)}
+          aria-label={text("查看参与者", "View participants")}
+          title={text("查看参与者", "View participants")}
         >
-          {conversation.displayName}
-        </button>
+          <Users className="size-4" aria-hidden="true" />
+        </Button>
       </header>
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+      <div ref={scrollArea} className="min-h-0 flex-1 overflow-y-auto px-5 py-4 [scrollbar-gutter:stable]">
         {hasOlder && (
           <div className="text-center">
             <Button
               variant="ghost"
               size="sm"
-              disabled={loading}
+              disabled={loadingOlder}
               onClick={loadOlder}
             >
               {text("加载更早的消息", "Load older messages")}
             </Button>
           </div>
         )}
-        {loading && (
-          <div
-            role="status"
-            className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground"
-          >
-            <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-            {text("加载中…", "Loading…")}
-          </div>
-        )}
+        {loading && messages.length === 0 && <div role="status" aria-label={text("加载邮件中", "Loading messages")} className="space-y-6 pt-5">
+          {[false, true, false].map((outgoing, index) => <div key={index} className={cn("flex items-start gap-3", outgoing && "flex-row-reverse")}>
+            <Skeleton className="size-9 shrink-0 rounded-full" />
+            <div className="w-3/5 space-y-2">
+              <Skeleton className="h-3 w-28" />
+              <Skeleton className="h-28 w-full rounded-lg" />
+            </div>
+          </div>)}
+        </div>}
         {error && (
           <p role="alert" className="text-sm text-destructive">
             {error}
@@ -302,7 +318,7 @@ export function ConversationPane({
                     ? accounts.find(
                         (account) => account.accountId === message.accountId,
                       )?.address || `account:${message.accountId}`
-                    : message.fromName || conversation.conversationId)
+                    : conversation.participants[0]?.email || conversation.conversationId)
                 }
                 outgoing={message.direction === "outgoing"}
               />
@@ -356,6 +372,26 @@ export function ConversationPane({
                           <Reply className="size-3" />
                           {text("回复", "Reply")}
                         </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-1 text-xs"
+                          onClick={() => onOpenOriginal(message)}
+                        >
+                          <FileText className="size-3" />
+                          {text("显示原文", "Show original")}
+                        </Button>
+                        {onAskAi && message.messageId && <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-1 text-xs"
+                          onClick={() => onAskAi(message)}
+                        >
+                          <Sparkles className="size-3" />
+                          {text("问 AI", "Ask AI")}
+                        </Button>}
                         <time
                           dateTime={message.receivedAt}
                           title={formatAbsoluteTime(message.receivedAt)}
@@ -392,7 +428,6 @@ export function ConversationPane({
             </article>
           </div>
         ))}
-        <div ref={bottom} />
       </div>
       <ConversationComposer
         replyInput={replyInput}

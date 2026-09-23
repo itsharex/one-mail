@@ -1,4 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod'
+import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { BadgeInfo, Bot, DatabaseBackup, RefreshCcw } from 'lucide-react'
 import * as React from 'react'
 import { useForm, useWatch } from 'react-hook-form'
@@ -15,6 +17,8 @@ import {
 } from '@renderer/components/backup/backup-import-dialog'
 import { getBackupSyncSettingsKey } from '@renderer/components/backup/backup-sync-draft'
 import { ResponsiveDialog } from '@renderer/components/responsive-dialog'
+import { Button } from '@renderer/components/ui/button'
+import { ScrollArea } from '@renderer/components/ui/scroll-area'
 import type{ AppSettings, AppUpdateStatus, AiSettings, AiSettingsInput, BackupImportResult, BackupImportSource, BackupSyncDownloadResult, BackupSyncSettings, SettingsUpdateInput, SystemInfo } from '@renderer/shared/types'
 import { useI18n, type TranslationKey } from '@renderer/lib/i18n'
 import { AiSettingsForm } from './ai-settings'
@@ -26,6 +30,7 @@ import type { BackupPending, BackupMessage } from './settings-types'
 
 type SettingsDialogProps = {
   open: boolean
+  standalone?: boolean
   settings: AppSettings | null
   systemInfo: SystemInfo | null
   updateStatus: AppUpdateStatus | null
@@ -70,6 +75,7 @@ const sections: Array<{
 
 export function SettingsDialog({
   open,
+  standalone = false,
   settings,
   systemInfo,
   updateStatus,
@@ -84,6 +90,8 @@ export function SettingsDialog({
   const { t } = useI18n()
   const settingsSchema = React.useMemo(() => createSettingsSchema(t), [t])
   const [section, setSection] = React.useState<SettingsSection>('general')
+  const scrollAreaRef = React.useRef<HTMLDivElement>(null)
+  const sectionRefs = React.useRef<Partial<Record<SettingsSection, HTMLElement>>>({})
   const [pending, setPending] = React.useState(false)
   const [backupPending, setBackupPending] = React.useState<BackupPending>(null)
   const [backupImportDialogOpen, setBackupImportDialogOpen] = React.useState(false)
@@ -101,6 +109,7 @@ export function SettingsDialog({
   const autoSaveTimerRef = React.useRef<number | null>(null)
   const queuedValuesRef = React.useRef<SettingsFormValues | null>(null)
   const savingRef = React.useRef(false)
+  const closingRef = React.useRef(false)
   const wasOpenRef = React.useRef(false)
   const backupImportSourceRef = React.useRef<BackupImportDialogSource>('sql')
   const form = useForm<SettingsFormValues>({
@@ -109,6 +118,34 @@ export function SettingsDialog({
     mode: 'onChange'
   })
   const watchedValues = useWatch({ control: form.control })
+
+  const getScrollRoot = (): HTMLDivElement | null =>
+    scrollAreaRef.current?.querySelector<HTMLDivElement>('[data-slot="scroll-area-viewport"]') ?? null
+
+  const scrollToSection = React.useCallback((targetSection: SettingsSection, behavior: ScrollBehavior = 'smooth'): void => {
+    const root = getScrollRoot()
+    const target = sectionRefs.current[targetSection]
+    if (!root || !target) return
+    root.scrollTo({
+      top: root.scrollTop + target.getBoundingClientRect().top - root.getBoundingClientRect().top - 16,
+      behavior
+    })
+    setSection(targetSection)
+  }, [])
+
+  const updateSectionFromScroll = React.useCallback((): void => {
+    const root = getScrollRoot()
+    if (!root) return
+    let current: SettingsSection = 'general'
+    for (const item of sections) {
+      const target = sectionRefs.current[item.value]
+      if (target && target.getBoundingClientRect().top <= root.getBoundingClientRect().top + 24) {
+        current = item.value
+      }
+    }
+    if (root.scrollHeight - root.scrollTop - root.clientHeight <= 2) current = 'about'
+    setSection(current)
+  }, [])
 
   const saveSettingsValues = React.useCallback(
     async (values: SettingsFormValues): Promise<void> => {
@@ -131,6 +168,7 @@ export function SettingsDialog({
           await onSubmit({
             syncIntervalMinutes: currentValues.syncIntervalMinutes,
             syncWindowDays: currentValues.syncWindowDays,
+            logRetentionDays: currentValues.logRetentionDays,
             openAtLogin: currentValues.openAtLogin,
             externalImagesBlocked: currentValues.externalImagesBlocked,
             bodyDisplayMode: currentValues.bodyDisplayMode,
@@ -155,7 +193,7 @@ export function SettingsDialog({
     [onSubmit, t]
   )
 
-  const flushPendingSettings = React.useCallback((): void => {
+  const flushPendingSettings = React.useCallback(async (): Promise<boolean> => {
     if (autoSaveTimerRef.current) {
       window.clearTimeout(autoSaveTimerRef.current)
       autoSaveTimerRef.current = null
@@ -163,9 +201,30 @@ export function SettingsDialog({
 
     const parsedValues = settingsSchema.safeParse(form.getValues())
     if (parsedValues.success) {
-      void saveSettingsValues(parsedValues.data)
+      await saveSettingsValues(parsedValues.data)
+      while (savingRef.current) await new Promise((resolve) => window.setTimeout(resolve, 20))
+      return areSettingsEqual(parsedValues.data, lastSavedValuesRef.current)
     }
+    return false
   }, [form, saveSettingsValues, settingsSchema])
+
+  React.useEffect(() => {
+    if (!standalone) return
+    let active = true
+    let stop: (() => void) | undefined
+    void getCurrentWindow().onCloseRequested((event) => {
+      if (closingRef.current) return
+      event.preventDefault()
+      if (backupPending) return
+      void flushPendingSettings().then((saved) => {
+        if (saved) {
+          closingRef.current = true
+          return invoke('settings_close_window')
+        }
+      }).catch((reason) => { closingRef.current = false; setError(String(reason)) })
+    }).then((unlisten) => { if (active) stop = unlisten; else unlisten() })
+    return () => { active = false; stop?.() }
+  }, [backupPending, flushPendingSettings, standalone])
 
   React.useEffect(() => {
     if (!open) {
@@ -182,7 +241,15 @@ export function SettingsDialog({
   }, [form, initialSection, open, settings])
 
   React.useEffect(() => {
-    if (!open || section !== 'backup') return
+    if (open) setSection(initialSection)
+  }, [initialSection, open])
+
+  React.useLayoutEffect(() => {
+    if (open) scrollToSection(initialSection, 'auto')
+  }, [initialSection, open, scrollToSection])
+
+  React.useEffect(() => {
+    if (!open) return
     if (!('__TAURI_INTERNALS__' in window)) return
 
     let cancelled = false
@@ -201,7 +268,7 @@ export function SettingsDialog({
     return () => {
       cancelled = true
     }
-  }, [open, section, t])
+  }, [open, t])
 
   React.useEffect(() => {
     if (!open) return
@@ -348,9 +415,68 @@ export function SettingsDialog({
     }
   }
 
+  const content = (
+    <div className="grid h-full min-h-0 grid-cols-[8rem_minmax(0,1fr)] overflow-hidden">
+      <nav
+        className="flex flex-col gap-0.5 border-r border-border/40 bg-muted p-2"
+        aria-label={t('settings.title')}
+      >
+        {sections.map((item) => {
+          const Icon = item.icon
+          const active = section === item.value
+          return (
+            <Button
+              key={item.value}
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-current={active ? 'page' : undefined}
+              className={`h-8 w-full min-w-0 justify-start gap-2 rounded-md px-2.5 text-left text-xs font-medium ${active
+                ? 'bg-background text-foreground'
+                : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground'}`}
+              onClick={() => scrollToSection(item.value)}
+            >
+              <Icon className="size-3.5 shrink-0" aria-hidden="true" />
+              <span className="truncate">{t(item.labelKey)}</span>
+            </Button>
+          )
+        })}
+        {pending && <span role="status" className="mt-auto px-2 text-[11px] text-muted-foreground">{t('common.saving')}</span>}
+      </nav>
+      <ScrollArea ref={scrollAreaRef} onScrollCapture={updateSectionFromScroll} className="h-full min-h-0 bg-muted">
+        <div className="mx-auto max-w-xl space-y-7 px-4 py-4">
+          <section ref={(node) => { sectionRefs.current.general = node ?? undefined }} aria-label={t('settings.general')}>
+            <GeneralSettingsForm form={form} error={error} />
+          </section>
+          <section ref={(node) => { sectionRefs.current.ai = node ?? undefined }} aria-label={t('settings.ai')}>
+            <AiSettingsForm settings={aiSettings} onVerify={onVerifyAi} onClear={onClearAi} />
+          </section>
+          <section ref={(node) => { sectionRefs.current.backup = node ?? undefined }} aria-label={t('settings.backup')}>
+            <BackupSettings
+              key={getBackupSyncSettingsKey(backupSyncSettings)}
+              pending={backupPending}
+              message={backupMessage}
+              error={backupError}
+              syncSettings={backupSyncSettings}
+              onExport={handleExport}
+              onImport={handleImport}
+              onSaveSync={handleSaveBackupSync}
+              onTestSync={handleTestBackupSync}
+              onUploadSync={handleUploadBackupSync}
+              onDownloadSync={handleDownloadBackupSync}
+            />
+          </section>
+          <section ref={(node) => { sectionRefs.current.about = node ?? undefined }} aria-label={t('settings.about')}>
+            <AboutSettings systemInfo={systemInfo} updateStatus={updateStatus} form={form} />
+          </section>
+        </div>
+      </ScrollArea>
+    </div>
+  )
+
   return (
     <>
-      <ResponsiveDialog
+      {standalone ? content : <ResponsiveDialog
         open={open}
         onOpenChange={handleOpenChange}
         title={t('settings.title')}
@@ -358,69 +484,8 @@ export function SettingsDialog({
         headerClassName="shrink-0 border-b bg-background px-4 py-2.5 pr-12 [&_[data-slot=dialog-title]]:text-sm! [&_[data-slot=drawer-title]]:text-sm!"
         bodyClassName="h-full min-h-0 overflow-hidden"
       >
-        <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden md:grid-cols-[144px_minmax(0,1fr)] md:grid-rows-1">
-          <nav
-            className="flex shrink-0 gap-1 border-b bg-muted/40 p-2 md:h-full md:flex-col md:border-r md:border-b-0"
-            aria-label={t('settings.title')}
-          >
-            {sections.map((item) => {
-              const Icon = item.icon
-              const active = section === item.value
-              return (
-                <button
-                  key={item.value}
-                  type="button"
-                  aria-current={active ? 'page' : undefined}
-                  className={`flex h-8 min-w-0 flex-1 items-center justify-center gap-2 rounded-md px-2 text-xs font-medium transition-colors md:flex-none md:justify-start ${
-                    active
-                      ? 'bg-background/95 text-foreground shadow-sm ring-1 ring-black/5 dark:ring-white/8'
-                      : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'
-                  }`}
-                  onClick={() => setSection(item.value)}
-                >
-                  <Icon className="size-3.5 shrink-0" aria-hidden="true" />
-                  <span className="truncate">{t(item.labelKey)}</span>
-                </button>
-              )
-            })}
-          </nav>
-
-          <div className="grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] bg-muted/25">
-            <div className="flex h-10 items-center border-b bg-background/90 px-4">
-              <h2 className="text-sm font-semibold">
-                {t(sections.find((item) => item.value === section)?.labelKey ?? 'settings.general')}
-              </h2>
-            </div>
-            <div className="min-h-0 overflow-auto">
-              {section === 'general' ? (
-                <GeneralSettingsForm form={form} error={error} />
-              ) : section === 'ai' ? (
-                <AiSettingsForm
-                  settings={aiSettings}
-                  onVerify={onVerifyAi}
-                  onClear={onClearAi}
-                />
-              ) : section === 'backup' ? (
-                <BackupSettings
-                  key={getBackupSyncSettingsKey(backupSyncSettings)}
-                  pending={backupPending}
-                  message={backupMessage}
-                  error={backupError}
-                  syncSettings={backupSyncSettings}
-                  onExport={handleExport}
-                  onImport={handleImport}
-                  onSaveSync={handleSaveBackupSync}
-                  onTestSync={handleTestBackupSync}
-                  onUploadSync={handleUploadBackupSync}
-                  onDownloadSync={handleDownloadBackupSync}
-                />
-              ) : (
-                <AboutSettings systemInfo={systemInfo} updateStatus={updateStatus} />
-              )}
-            </div>
-          </div>
-        </div>
-      </ResponsiveDialog>
+        {content}
+      </ResponsiveDialog>}
 
       <BackupImportDialog
         open={backupImportDialogOpen}

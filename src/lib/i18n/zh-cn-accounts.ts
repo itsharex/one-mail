@@ -112,7 +112,7 @@ export const zhCNAccounts = {
   'account.outlook.title': '使用 Microsoft 登录',
   'account.outlook.description':
     '点击下方按钮后会打开系统浏览器完成 Microsoft 授权。OneMail 会自动读取授权账号邮箱，保存后在后台使用 OAuth2 + IMAP XOAUTH2 同步邮件。',
-  'account.outlookImapHelp.title': '需要为账号启用 IMAP 访问',
+  'account.outlookImapHelp.title': 'Outlook IMAP 连接被拒绝',
   'account.outlookImapHelp.descriptionWithAccount':
     '{account} 的 Outlook IMAP 登录被服务器拒绝。账号已保存，完成下列设置后点击该邮箱右侧刷新。',
   'account.outlookImapHelp.description':
@@ -165,7 +165,11 @@ export const zhCNAccounts = {
   'account.warning.oauthScopeMessage':
     'Microsoft 授权已过期或缺少 Outlook IMAP 权限，需要重新登录并授权。',
   'account.warning.outlookImapAccessMessage':
-    'Microsoft 登录已通过，但 Outlook 没有允许 IMAP 客户端连接这个邮箱。',
+    'Microsoft 登录已通过，Outlook 拒绝了 IMAP 连接。',
+  'account.warning.outlookImapAction':
+    '在 Outlook.com 的“设置 > 邮件 > 转发和 IMAP”中开启 IMAP，保存后重新同步。',
+  'account.warning.outlookImapActivity':
+    '如果已经开启，前往 account.live.com/activity 将最近的连接标记为“这是我本人”。',
   'account.warning.networkMessage': '暂时无法连接到邮箱服务器。',
   'account.warning.syncMessage': '同步邮件时遇到错误。',
   'account.warning.primaryReauthorize': '重新授权',
@@ -186,6 +190,7 @@ export const zhCNAccounts = {
   'account.warning.networkStep2': '检查代理、VPN、防火墙或公司网络限制。',
   'account.warning.networkStep3': '网络恢复后重新同步该账号。',
   'account.warning.syncStep1': '先重新同步一次，排除临时服务器错误。',
+  'account.warning.syncOAuthStep2': '如果提示授权失效，再点击重新授权。',
   'account.warning.syncStep2': '如果持续失败，检查 IMAP 主机、端口和加密方式。',
   'account.warning.syncStep3': '必要时重新保存密码或授权码。',
   'account.warning.genericStep1': '重新同步该账号。',

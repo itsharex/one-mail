@@ -5,17 +5,13 @@ import {
   AccountUpdateInput,
   AiChatInput,
   AiChatResult,
-  AiSettings,
-  AiSettingsInput,
   BackupImportSource,
   BackupImportResult,
   BackupSyncDownloadResult,
-  SettingsUpdateInput,
   SyncAllRunResult,
 } from '@renderer/shared/types'
 import {
   chatWithAi,
-  clearAiSettings,
   deleteDraftMessage,
   deleteOutboxMessage,
   loadAccounts,
@@ -24,23 +20,21 @@ import {
   reauthorizeAccount,
   removeAccount,
   retryOutboxMessage,
-  saveSettings,
   syncAllAccounts,
   syncAccount,
   updateAccount,
-  verifyAndSaveAiSettings,
 } from '@renderer/pages/mailbox/api'
-import { normalizeLocale, useI18n } from '@renderer/lib/i18n'
+import { useI18n } from '@renderer/lib/i18n'
 import { OutboxMessage } from '@renderer/pages/mailbox/api'
 import { toast } from 'sonner'
 import {
   getErrorMessage,
   getNextSelectedAccountId,
-  shouldEditCredential,
-  shouldShowOutlookImapHelp,
 } from '../mailbox-utils'
-import { useMailboxWorkspaceData, type SyncAllFailure } from './use-mailbox-workspace-data'
+import { useMailboxWorkspaceData } from './use-mailbox-workspace-data'
 export type { DialogKind } from './use-mailbox-workspace-data'
+
+type SyncAllFailure = { accountId: number; error: string }
 
 function formatImportResultMessage(
   result: BackupImportResult | BackupSyncDownloadResult,
@@ -66,7 +60,7 @@ function getSyncAllFailures(result: SyncAllRunResult): SyncAllFailure[] {
 
 export function useMailboxWorkspaceController() {
   const data = useMailboxWorkspaceData()
-  const { backupImportBusy, clearSyncing, discardComposerDraft,  finishSyncing, refreshAccounts, refreshMailbox, refreshOutbox, reloadAfterBackupImport, saveComposerDraft, selectedAccountId, setAccounts, setAiSettings, setBackupImportDialogOpen, setBackupImportSource, setDialogAccountId, setDialogKind, setError, setLocale, setNotice, setOutboxPending, setOutlookImapHelpAccount, setSelectedAccountId, setSettings, setSyncFailures, startSyncing, syncingAccountIds, t } = data
+  const { backupImportBusy, clearSyncing, discardComposerDraft,  finishSyncing, refreshAccounts, refreshMailbox, refreshOutbox, reloadAfterBackupImport, saveComposerDraft, selectedAccountId, setAccounts, setAiSettings, setBackupImportDialogOpen, setBackupImportSource, setDialogAccountId, setDialogKind, setError, setNotice, setOutboxPending, setSelectedAccountId, setWarningAccountId, startSyncing, syncingAccountIds, t } = data
   function handleOpenAddAccountWindow(): void {
     void openAddAccountWindow().catch((openError) => {
       setError(getErrorMessage(openError, t('mailbox.openAddAccountWindowError')))
@@ -141,6 +135,7 @@ export function useMailboxWorkspaceController() {
     try {
       const authorizedAccount = await reauthorizeAccount(account.accountId)
       await refreshAccounts()
+      setWarningAccountId((current) => current === account.id ? null : current)
       finishSyncing(account.id, 'success', {
         label: account.name,
         startedAt,
@@ -151,7 +146,7 @@ export function useMailboxWorkspaceController() {
         status: authorizedAccount.status,
         credentialState: authorizedAccount.credentialState,
         lastError: authorizedAccount.lastError
-      })
+      }, false)
     } catch (reauthorizeError) {
       const message = getErrorMessage(reauthorizeError, t('mailbox.reauthorizeError'))
       setError(message)
@@ -164,10 +159,11 @@ export function useMailboxWorkspaceController() {
     }
   }
 
-  async function handleRefreshAccount(account: Account): Promise<void> {
+  async function handleRefreshAccount(account: Account, showWarning = true): Promise<void> {
     if (syncingAccountIds.has('all') || syncingAccountIds.has(account.id)) return
-    setSyncFailures((current) => account.id === 'all' ? [] : current.filter((failure) => failure.accountId !== account.accountId))
     const startedAt = new Date()
+    let failedAccounts: SyncAllFailure[] = []
+    let skippedSync = false
     const syncMessage =
       account.id === 'all'
         ? t('mailbox.syncingAll')
@@ -183,12 +179,15 @@ export function useMailboxWorkspaceController() {
     try {
       let syncFailureMessage: string | null = null
       if (account.accountId) {
-        await syncAccount(account.accountId)
+        const result = await syncAccount(account.accountId)
+        if (result.ok === false) {
+          skippedSync = result.skipped === true
+          throw new Error(result.error || t('mailbox.refreshAccountError'))
+        }
       } else if (account.id === 'all') {
         const syncResult = await syncAllAccounts()
-        const failures = getSyncAllFailures(syncResult)
-        setSyncFailures(failures)
-        syncFailureMessage = failures.length ? t('mailbox.syncFailureCount', { count: failures.length }) : null
+        failedAccounts = getSyncAllFailures(syncResult)
+        syncFailureMessage = failedAccounts.length ? t('mailbox.syncFailureCount', { count: failedAccounts.length }) : null
       } else {
         return
       }
@@ -209,14 +208,24 @@ export function useMailboxWorkspaceController() {
       })
     } catch (refreshError) {
       const message = getErrorMessage(refreshError, t('mailbox.refreshAccountError'))
-      if (shouldShowOutlookImapHelp(message, account)) {
-        setOutlookImapHelpAccount(account)
+      const failures = failedAccounts.length
+        ? failedAccounts
+        : account.accountId ? [{ accountId: account.accountId, error: message }] : []
+      if (skippedSync) {
+        setError(message)
+      } else if (failures.length) {
+        setAccounts((current) => current.map((item) => {
+          const failure = failures.find((candidate) => candidate.accountId === item.accountId)
+          return failure ? {
+            ...item,
+            status: item.connectionStatus === 'reauthorize' ? 'auth_error' : 'sync_error',
+            lastError: failure.error
+          } : item
+        }))
+        if (showWarning) setWarningAccountId(String(failures[0].accountId))
+      } else {
+        setError(message)
       }
-      if (shouldEditCredential(message)) {
-        setDialogAccountId(account.id)
-        setDialogKind('edit')
-      }
-      setError(account.accountId ? `${account.address || account.name}：${message}` : message)
       finishSyncing(account.id, 'error', {
         label: account.name,
         startedAt,
@@ -228,24 +237,6 @@ export function useMailboxWorkspaceController() {
     } finally {
       clearSyncing(account.id)
     }
-  }
-
-  async function handleUpdateSettings(input: SettingsUpdateInput): Promise<void> {
-    const nextSettings = await saveSettings(input)
-    setSettings(nextSettings)
-    setLocale(normalizeLocale(nextSettings.locale))
-  }
-
-  async function handleVerifyAiSettings(input: AiSettingsInput): Promise<AiSettings> {
-    const nextSettings = await verifyAndSaveAiSettings(input)
-    setAiSettings(nextSettings)
-    return nextSettings
-  }
-
-  async function handleClearAiSettings(): Promise<AiSettings> {
-    const nextSettings = await clearAiSettings()
-    setAiSettings(nextSettings)
-    return nextSettings
   }
 
   async function handleAiChat(input: AiChatInput): Promise<AiChatResult> {
@@ -346,7 +337,6 @@ export function useMailboxWorkspaceController() {
     ...data,
     handleAiChat,
     handleBackupImported,
-    handleClearAiSettings,
     handleDeleteOutbox,
     handleDiscardComposerDraft,
     handleImportBackup,
@@ -358,7 +348,5 @@ export function useMailboxWorkspaceController() {
     handleSaveComposerDraft,
     handleSelectAccount,
     handleUpdateAccount,
-    handleUpdateSettings,
-    handleVerifyAiSettings,
   }
 }

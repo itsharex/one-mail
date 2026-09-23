@@ -5,6 +5,7 @@ import { MoonStar, SunMedium } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
 import { useI18n } from '@renderer/lib/i18n'
+import { setAppTheme } from '@renderer/lib/appearance'
 
 type ThemeName = 'light' | 'dark'
 
@@ -51,15 +52,8 @@ export function ThemeToggleButton(): React.JSX.Element {
   const [theme, setTheme] = React.useState<ThemeName>(() => getDomTheme())
 
   function applyTheme(nextTheme: ThemeName): void {
-    const root = document.documentElement
-    root.classList.remove('light', 'dark')
-    root.classList.add(nextTheme)
-    root.style.colorScheme = nextTheme
-    window.localStorage.setItem('theme', nextTheme)
+    setAppTheme(nextTheme)
     setTheme(nextTheme)
-    void window.api.system
-      .setTitleBarTheme(nextTheme)
-      .catch((error) => console.warn('Failed to update the title bar theme.', error))
   }
 
   function handleToggle(event: MouseEvent<HTMLButtonElement>): void {

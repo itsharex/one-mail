@@ -81,7 +81,8 @@ export function useConversations(accountId?: number, refreshKey?: number) {
 
   return {
     keyword, setKeyword, selectedId, selected, setSelectedId, openMessage, focusedMessageId, conversations, messages,
-    loading: list.isFetching, loadingMessages: timeline.isFetching,
+    loading: list.isPending, loadingMore: list.isFetchingNextPage,
+    loadingMessages: timeline.isPending, loadingOlder: timeline.isFetchingNextPage,
     error: list.error ? String(list.error) : '',
     messageError: timeline.error ? String(timeline.error) : '',
     refresh, hasMore: list.hasNextPage, hasOlder: timeline.hasNextPage, loadMore, loadOlder

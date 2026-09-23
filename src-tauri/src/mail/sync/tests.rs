@@ -162,6 +162,10 @@ fn skips_accounts_that_already_need_attention() {
     );
 
     account.status = "auth_error".to_string();
+    account.last_error = Some("Outlook IMAP 连接被拒绝：User is authenticated but not connected.".to_string());
+    assert_eq!(sync_skip_reason(&account), None);
+
+    account.status = "auth_error".to_string();
     account.connection_state = "connected".to_string();
     account.last_error = None;
     assert_eq!(

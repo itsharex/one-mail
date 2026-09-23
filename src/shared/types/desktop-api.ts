@@ -91,9 +91,13 @@ export type OneMailApi = {
     onStatus: (callback: (status: AppUpdateStatus) => void) => () => void
   }
   system: {
+    getTheme: () => Promise<AppTheme | null>
     info: () => Promise<SystemInfo>
     setTitleBarTheme: (theme: AppTheme) => Promise<boolean>
     revealDatabase: () => Promise<boolean>
+    revealLogs: () => Promise<boolean>
+    reloadClient: () => Promise<boolean>
+    openDevtools: () => Promise<boolean>
     revealPath: (path: string) => Promise<boolean>
     openExternal: (url: string) => Promise<boolean>
   }

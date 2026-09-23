@@ -1,5 +1,7 @@
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
 use base64::{engine::general_purpose::URL_SAFE as BASE64_URL, Engine};
-use reqwest::{Client, StatusCode};
+use reqwest::{header::RETRY_AFTER, Client, StatusCode};
 use serde_json::Value;
 
 use crate::{
@@ -12,6 +14,9 @@ use crate::{
 
 const GRAPH_DELTA: &str = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta";
 const CURSOR_PREFIX: &str = "graph-delta:";
+const MAX_RETRIES: u32 = 3;
+const RETRY_BUDGET: Duration = Duration::from_secs(300);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub async fn sync(state: &AppState, account: &MailAccount) -> Result<Value, String> {
     ensure_capability(state, account)?;
@@ -238,23 +243,77 @@ fn parse_message(value: &Value) -> Result<FetchedMessage, ApiError> {
 }
 
 async fn get_json(request: reqwest::RequestBuilder) -> Result<Value, ApiError> {
-    let response = request
-        .send()
-        .await
-        .map_err(|error| ApiError::other(format!("Microsoft Graph 请求失败：{error}")))?;
-    let status = response.status();
-    if status == StatusCode::UNAUTHORIZED {
-        return Err(ApiError::Unauthorized);
+    let started = Instant::now();
+    for attempt in 0..=MAX_RETRIES {
+        let remaining = RETRY_BUDGET.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(ApiError::Retryable(
+                "Microsoft Graph 重试已超时，稍后重试。".to_string(),
+            ));
+        }
+        let retry_request = request
+            .try_clone()
+            .ok_or_else(|| ApiError::other("Microsoft Graph 请求无法重试。"))?
+            .timeout(remaining.min(REQUEST_TIMEOUT));
+        let response = retry_request.send().await.map_err(|error| {
+            if error.is_timeout() {
+                ApiError::Retryable("Microsoft Graph 请求已超时，稍后重试。".to_string())
+            } else {
+                ApiError::other(format!("Microsoft Graph 请求失败：{error}"))
+            }
+        })?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(ApiError::Unauthorized);
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::SERVICE_UNAVAILABLE {
+            let delay = retry_delay(response.headers().get(RETRY_AFTER), attempt);
+            let remaining = RETRY_BUDGET.saturating_sub(started.elapsed());
+            if delay > remaining {
+                return Err(ApiError::Retryable(format!(
+                    "Microsoft Graph 限流（HTTP {status}）：Retry-After 超出本次重试窗口，请稍后重试。"
+                )));
+            }
+            if attempt == MAX_RETRIES {
+                return Err(ApiError::Retryable(format!(
+                    "Microsoft Graph 暂时不可用（HTTP {status}），稍后重试。"
+                )));
+            }
+            tokio::time::sleep(delay).await;
+            continue;
+        }
+        if !status.is_success() {
+            return Err(ApiError::other(format!(
+                "Microsoft Graph 请求失败（HTTP {status}）。"
+            )));
+        }
+        return response
+            .json()
+            .await
+            .map_err(|error| ApiError::other(format!("解析 Microsoft Graph 响应失败：{error}")));
     }
-    if !status.is_success() {
-        return Err(ApiError::other(format!(
-            "Microsoft Graph 请求失败（HTTP {status}）。"
-        )));
+    unreachable!()
+}
+
+fn retry_delay(value: Option<&reqwest::header::HeaderValue>, attempt: u32) -> Duration {
+    if let Some(value) = value.and_then(|value| value.to_str().ok()) {
+        if let Ok(seconds) = value.parse::<u64>() {
+            return Duration::from_secs(seconds);
+        }
+        if let Ok(date) = chrono::DateTime::parse_from_rfc2822(value) {
+            return date
+                .signed_duration_since(chrono::Utc::now())
+                .to_std()
+                .unwrap_or_default();
+        }
     }
-    response
-        .json()
-        .await
-        .map_err(|error| ApiError::other(format!("解析 Microsoft Graph 响应失败：{error}")))
+    let base_ms = 500_u64 * (1_u64 << attempt);
+    let jitter = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64
+        % base_ms;
+    Duration::from_millis(base_ms + jitter)
 }
 
 fn jwt_audience(token: &str) -> Option<Vec<String>> {
@@ -286,6 +345,7 @@ fn stable_uid(id: &str) -> i64 {
 
 enum ApiError {
     Unauthorized,
+    Retryable(String),
     Other(String),
 }
 
@@ -299,6 +359,7 @@ impl ApiError {
             Self::Unauthorized => {
                 "Microsoft Graph access token 无效，且刷新后仍未通过认证。".to_string()
             }
+            Self::Retryable(error) => format!("API_RETRYABLE:{error}"),
             Self::Other(error) => error,
         }
     }

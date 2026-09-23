@@ -4,6 +4,7 @@ export type AppSettings = {
   bodyDisplayMode: 'text' | 'html'
   syncIntervalMinutes: number
   syncWindowDays: number
+  logRetentionDays: number
   openAtLogin: boolean
   externalImagesBlocked: boolean
   locale: string

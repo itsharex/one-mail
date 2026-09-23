@@ -1,6 +1,7 @@
 use std::collections::HashSet;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use reqwest::{Client, StatusCode};
+use reqwest::{header::RETRY_AFTER, Client, StatusCode};
 use serde_json::Value;
 use url::form_urlencoded::Serializer;
 
@@ -15,6 +16,9 @@ use crate::{
 const GMAIL_API: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
 const CURSOR_PREFIX: &str = "gmail-history:";
 const MAX_MESSAGES: usize = 200;
+const MAX_RETRIES: u32 = 3;
+const RETRY_BUDGET: Duration = Duration::from_secs(300);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub async fn sync(state: &AppState, account: &MailAccount) -> Result<Value, String> {
     let connection = db::open(state)?;
@@ -330,26 +334,80 @@ async fn get_message(
 }
 
 async fn get_json(request: reqwest::RequestBuilder) -> Result<Value, ApiError> {
-    let response = request
-        .send()
-        .await
-        .map_err(|error| ApiError::other(format!("Gmail API 请求失败：{error}")))?;
-    let status = response.status();
-    if status == StatusCode::UNAUTHORIZED {
-        return Err(ApiError::Unauthorized);
+    let started = Instant::now();
+    for attempt in 0..=MAX_RETRIES {
+        let remaining = RETRY_BUDGET.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(ApiError::Retryable(
+                "Gmail API 重试已超时，稍后重试。".to_string(),
+            ));
+        }
+        let retry_request = request
+            .try_clone()
+            .ok_or_else(|| ApiError::other("Gmail API 请求无法重试。"))?
+            .timeout(remaining.min(REQUEST_TIMEOUT));
+        let response = retry_request.send().await.map_err(|error| {
+            if error.is_timeout() {
+                ApiError::Retryable("Gmail API 请求已超时，稍后重试。".to_string())
+            } else {
+                ApiError::other(format!("Gmail API 请求失败：{error}"))
+            }
+        })?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(ApiError::Unauthorized);
+        }
+        if status == StatusCode::NOT_FOUND {
+            return Err(ApiError::HistoryExpired);
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::SERVICE_UNAVAILABLE {
+            let delay = retry_delay(response.headers().get(RETRY_AFTER), attempt);
+            let remaining = RETRY_BUDGET.saturating_sub(started.elapsed());
+            if delay > remaining {
+                return Err(ApiError::Retryable(format!(
+                    "Gmail API 限流（HTTP {status}）：Retry-After 超出本次重试窗口，请稍后重试。"
+                )));
+            }
+            if attempt == MAX_RETRIES {
+                return Err(ApiError::Retryable(format!(
+                    "Gmail API 暂时不可用（HTTP {status}），稍后重试。"
+                )));
+            }
+            tokio::time::sleep(delay).await;
+            continue;
+        }
+        if !status.is_success() {
+            return Err(ApiError::other(format!(
+                "Gmail API 请求失败（HTTP {status}）。"
+            )));
+        }
+        return response
+            .json()
+            .await
+            .map_err(|error| ApiError::other(format!("解析 Gmail API 响应失败：{error}")));
     }
-    if status == StatusCode::NOT_FOUND {
-        return Err(ApiError::HistoryExpired);
+    unreachable!()
+}
+
+fn retry_delay(value: Option<&reqwest::header::HeaderValue>, attempt: u32) -> Duration {
+    if let Some(value) = value.and_then(|value| value.to_str().ok()) {
+        if let Ok(seconds) = value.parse::<u64>() {
+            return Duration::from_secs(seconds);
+        }
+        if let Ok(date) = chrono::DateTime::parse_from_rfc2822(value) {
+            return date
+                .signed_duration_since(chrono::Utc::now())
+                .to_std()
+                .unwrap_or_default();
+        }
     }
-    if !status.is_success() {
-        return Err(ApiError::other(format!(
-            "Gmail API 请求失败（HTTP {status}）。"
-        )));
-    }
-    response
-        .json()
-        .await
-        .map_err(|error| ApiError::other(format!("解析 Gmail API 响应失败：{error}")))
+    let base_ms = 500_u64 * (1_u64 << attempt);
+    let jitter = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64
+        % base_ms;
+    Duration::from_millis(base_ms + jitter)
 }
 
 fn parse_from(value: Option<&str>) -> (Option<String>, Option<String>) {
@@ -420,6 +478,7 @@ fn stable_uid(id: &str) -> i64 {
 enum ApiError {
     Unauthorized,
     HistoryExpired,
+    Retryable(String),
     Other(String),
 }
 
@@ -432,7 +491,26 @@ impl ApiError {
         match self {
             Self::Unauthorized => "Gmail API access token 无效，且刷新后仍未通过认证。".to_string(),
             Self::HistoryExpired => "Gmail history 游标已过期，需要重新建立同步基线。".to_string(),
+            Self::Retryable(error) => format!("API_RETRYABLE:{error}"),
             Self::Other(error) => error,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_after_seconds_take_priority_over_backoff() {
+        let header = reqwest::header::HeaderValue::from_static("7");
+        assert_eq!(retry_delay(Some(&header), 2), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn missing_retry_after_uses_bounded_exponential_backoff() {
+        let delay = retry_delay(None, 2);
+        assert!(delay >= Duration::from_secs(2));
+        assert!(delay < Duration::from_secs(4));
     }
 }

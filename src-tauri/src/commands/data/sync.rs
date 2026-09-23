@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::{mail::sync as mail_sync, state::AppState};
+use crate::{client_log, commands::system, mail::sync as mail_sync, state::{wait_for_batch, AppState, BatchStart}};
 
 #[tauri::command]
 pub fn sync_status(state: State<'_, AppState>) -> Result<Value, String> {
@@ -15,15 +15,33 @@ pub async fn sync_start_all(
     state: State<'_, AppState>,
     mode: Option<String>,
 ) -> Result<Value, String> {
-    let result = mail_sync::sync_all(&state, mode.as_deref(), |result, completed, total| {
-        emit_sync_events(&app, result, mode.as_deref());
-        let _ = app.emit("sync/progress", json!({
-            "accountId": result["accountId"], "completed": completed, "total": total,
-            "ok": result["ok"], "skipped": result.get("skipped").and_then(Value::as_bool).unwrap_or(false),
-            "error": result.get("error").and_then(Value::as_str)
-        }));
-    }).await?;
-    Ok(result)
+    loop {
+        match state.sync_batch_tracker.start(mode.as_deref())? {
+            BatchStart::Join(receiver) => return wait_for_batch(receiver).await,
+            BatchStart::WaitOther(receiver) => {
+                let _ = wait_for_batch(receiver).await;
+                tokio::task::yield_now().await;
+            }
+            BatchStart::Leader(guard) => {
+                let _ = client_log::write(&app, "INFO Manual sync started");
+                let result = mail_sync::sync_all(&state, mode.as_deref(), |result, completed, total| {
+                    let status = if result.get("ok").and_then(Value::as_bool) == Some(true) { "complete" } else { "failed" };
+                    let _ = client_log::write(&app, &format!("INFO Sync account {} {status} ({completed}/{total})", result["accountId"]));
+                    publish_sync_result(&app, result, mode.as_deref(), "manual");
+                    let _ = app.emit("sync/progress", json!({
+                        "accountId": result["accountId"], "completed": completed, "total": total,
+                        "ok": result["ok"], "skipped": result.get("skipped").and_then(Value::as_bool).unwrap_or(false),
+                        "error": result.get("error").and_then(Value::as_str)
+                    }));
+                }, Some(&|account_id, stage, folder| {
+                    let _ = app.emit("sync/progress", json!({ "accountId": account_id, "stage": stage, "folder": folder }));
+                })).await;
+                let _ = client_log::write(&app, "INFO Manual sync finished");
+                guard.complete(result.clone());
+                return result;
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -33,8 +51,18 @@ pub async fn sync_start_account(
     account_id: i64,
     mode: Option<String>,
 ) -> Result<Value, String> {
-    let result = mail_sync::sync_account(&state, account_id, mode.as_deref()).await?;
-    emit_sync_events(&app, &result, mode.as_deref());
+    let _ = client_log::write(&app, &format!("INFO Sync account {account_id} started"));
+    let result = mail_sync::sync_account(&state, account_id, mode.as_deref(), Some(&|account_id, stage, folder| {
+        let _ = app.emit("sync/progress", json!({ "accountId": account_id, "stage": stage, "folder": folder }));
+    })).await?;
+    let status = if result.get("ok").and_then(Value::as_bool) == Some(true) { "complete" } else { "failed" };
+    let _ = client_log::write(&app, &format!("INFO Sync account {account_id} {status}"));
+    publish_sync_result(&app, &result, mode.as_deref(), "manual");
+    if result.get("ok").and_then(Value::as_bool) == Some(false)
+        && result.get("skipped").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(result.get("error").and_then(Value::as_str).unwrap_or("账号同步未完成。").to_string());
+    }
     Ok(result)
 }
 
@@ -43,7 +71,7 @@ pub fn notifications_status() -> Value {
     json!({ "desktopSupported": true })
 }
 
-fn emit_sync_events(app: &AppHandle, result: &Value, mode: Option<&str>) {
+pub(crate) fn publish_sync_result(app: &AppHandle, result: &Value, mode: Option<&str>, reason: &str) {
     let account_results = result
         .get("accounts")
         .and_then(Value::as_array)
@@ -51,7 +79,10 @@ fn emit_sync_events(app: &AppHandle, result: &Value, mode: Option<&str>) {
         .unwrap_or_else(|| std::slice::from_ref(result));
 
     for account_result in account_results {
-        if account_result.get("ok").and_then(Value::as_bool) != Some(true) {
+        if account_result.get("skipped").and_then(Value::as_bool) == Some(true)
+            || (account_result.get("ok").and_then(Value::as_bool) != Some(true)
+                && account_result.get("newMessageCount").and_then(Value::as_u64).unwrap_or(0) == 0)
+        {
             continue;
         }
         let Some(account_id) = account_result.get("accountId").and_then(Value::as_i64) else {
@@ -62,13 +93,20 @@ fn emit_sync_events(app: &AppHandle, result: &Value, mode: Option<&str>) {
             "sync/mailboxChanged",
             json!({
                 "accountId": account_id,
-                "reason": "manual",
+                "reason": reason,
                 "changedAt": changed_at
             }),
         );
 
-        if let Some(notification) = new_mail_notification(account_result, mode) {
-            let _ = app.emit("notifications/newMail", notification);
+        if let Some(mut notification) = new_mail_notification(account_result, mode) {
+            notification["reason"] = Value::String(reason.to_owned());
+            let _ = app.emit("notifications/newMail", &notification);
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = system::send_new_mail_notification(&app, &notification).await {
+                    eprintln!("Failed to show new-mail notification: {error}");
+                }
+            });
         }
     }
 }

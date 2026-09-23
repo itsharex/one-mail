@@ -53,6 +53,7 @@ export function toAccountList(accounts: MailAccount[], accountStats: AccountMail
       address: account.email,
       unread: stats?.unreadCount ?? 0,
       messageCount: stats?.totalCount ?? 0,
+      latestMessageAt: stats?.latestMessageAt ?? null,
       credentialState: account.credentialState,
       status: account.status,
       connectionStatus: account.connectionStatus ?? 'connected',

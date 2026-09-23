@@ -121,7 +121,7 @@ export const enUSAccounts = {
   'account.outlook.title': 'Sign in with Microsoft',
   'account.outlook.description':
     'After clicking the button below, OneMail opens the system browser to complete Microsoft authorization. OneMail reads the authorized email address automatically and syncs mail in the background with OAuth2 + IMAP XOAUTH2 after saving.',
-  'account.outlookImapHelp.title': 'Enable IMAP access for this account',
+  'account.outlookImapHelp.title': 'Outlook IMAP connection refused',
   'account.outlookImapHelp.descriptionWithAccount':
     'Outlook IMAP sign-in was rejected for {account}. The account has been saved. Complete these settings, then refresh this mailbox from the account list.',
   'account.outlookImapHelp.description':
@@ -179,7 +179,11 @@ export const enUSAccounts = {
   'account.warning.oauthScopeMessage':
     'Microsoft authorization has expired or is missing Outlook IMAP access. Sign in again and grant access.',
   'account.warning.outlookImapAccessMessage':
-    'Microsoft sign-in succeeded, but Outlook has not allowed IMAP clients to connect to this mailbox.',
+    'Microsoft sign-in succeeded, but Outlook rejected the IMAP connection.',
+  'account.warning.outlookImapAction':
+    'Enable IMAP in Outlook.com Settings > Mail > Forwarding and IMAP, save, then sync again.',
+  'account.warning.outlookImapActivity':
+    'If IMAP is already enabled, mark the recent connection as “This was me” at account.live.com/activity.',
   'account.warning.networkMessage': 'OneMail cannot connect to the mail server right now.',
   'account.warning.syncMessage': 'An error occurred while syncing mail.',
   'account.warning.primaryReauthorize': 'Reauthorize',
@@ -207,6 +211,7 @@ export const enUSAccounts = {
   'account.warning.networkStep2': 'Check proxy, VPN, firewall, or workplace network restrictions.',
   'account.warning.networkStep3': 'Sync this account again after the network recovers.',
   'account.warning.syncStep1': 'Try syncing once more to rule out a temporary server error.',
+  'account.warning.syncOAuthStep2': 'If authorization has expired, click Reauthorize.',
   'account.warning.syncStep2':
     'If it keeps failing, check the IMAP host, port, and encryption method.',
   'account.warning.syncStep3': 'Save the password or authorization code again if needed.',

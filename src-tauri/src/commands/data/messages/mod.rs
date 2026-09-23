@@ -17,7 +17,8 @@ pub fn messages_stats(state: State<'_, AppState>) -> Result<Value, String> {
     let mut statement = connection
         .prepare(
             "SELECT m.account_id, COUNT(*) AS total_count,
-                    SUM(CASE WHEN m.is_read=0 THEN 1 ELSE 0 END) AS unread_count
+                    SUM(CASE WHEN m.is_read=0 THEN 1 ELSE 0 END) AS unread_count,
+                    MAX(COALESCE(unixepoch(m.received_at),unixepoch(m.internal_date),unixepoch(m.created_at))) AS latest_message_at
              FROM onemail_mail_messages m
              WHERE m.remote_deleted=0 AND m.user_hidden=0
              GROUP BY m.account_id",
@@ -28,7 +29,8 @@ pub fn messages_stats(state: State<'_, AppState>) -> Result<Value, String> {
             Ok(json!({
                 "accountId": row.get::<_, i64>(0)?,
                 "totalCount": row.get::<_, i64>(1)?,
-                "unreadCount": row.get::<_, i64>(2)?
+                "unreadCount": row.get::<_, i64>(2)?,
+                "latestMessageAt": row.get::<_, Option<i64>>(3)?
             }))
         })
         .map_err(database_error)?

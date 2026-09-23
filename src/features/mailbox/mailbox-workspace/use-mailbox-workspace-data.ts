@@ -1,7 +1,9 @@
 import * as React from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { queryClient } from '@renderer/lib/query-client'
 import { type BackupImportDialogSource } from '@renderer/components/backup/backup-import-dialog'
 import { Account } from '@renderer/components/mail/types'
+import { getAccountWarning } from '@renderer/components/account/account-warning'
 import { ResizablePrimitive } from '@renderer/components/ui/resizable'
 import { AiSettings, AppSettings, AppUpdateStatus, SystemInfo } from '@renderer/shared/types'
 import {
@@ -14,28 +16,15 @@ import {
   onAppUpdateStatus,
   onMailboxChanged,
   onSyncProgress,
-  onNewMail,
   syncAccount,
 } from '@renderer/pages/mailbox/api'
 import { normalizeLocale, useI18n } from '@renderer/lib/i18n'
-import {
-  onSystemNotificationOpen,
-  showNewMailSystemNotification,
-  showSyncCompleteSystemNotification,
-} from '@renderer/lib/system-notifications'
-import { normalizeProviderKey } from '@renderer/shared/provider-metadata'
+import { onSystemNotificationOpen } from '@renderer/lib/system-notifications'
 import { OutboxMessage } from '@renderer/pages/mailbox/api'
-import { toast } from 'sonner'
-import {
-  createOutlookHelpAccount,
-  getErrorMessage,
-  getFallbackAccount,
-  shouldShowOutlookImapHelp,
-} from '../mailbox-utils'
+import { getErrorMessage, getFallbackAccount } from '../mailbox-utils'
 import { useMailComposer } from '../use-mail-composer'
 import { useSyncFeedback } from '../use-sync-feedback'
-export type DialogKind = 'edit' | 'delete' | 'settings' | null
-export type SyncAllFailure = { accountId: number; error: string }
+export type DialogKind = 'edit' | 'delete' | null
 
 export function useMailboxWorkspaceData() {
   const { setLocale, t } = useI18n()
@@ -52,21 +41,15 @@ export function useMailboxWorkspaceData() {
   const [backupImportSource, setBackupImportSource] =
     React.useState<BackupImportDialogSource>('sql')
   const [backupImportBusy, setBackupImportBusy] = React.useState(false)
-  const [settingsInitialSection, setSettingsInitialSection] = React.useState<'general' | 'about'>(
-    'general'
-  )
   const [dialogAccountId, setDialogAccountId] = React.useState<string | null>(null)
   const [warningAccountId, setWarningAccountId] = React.useState<string | null>(null)
   const [outboxOpen, setOutboxOpen] = React.useState(false)
   const [outboxMessages, setOutboxMessages] = React.useState<OutboxMessage[]>([])
   const [outboxPending, setOutboxPending] = React.useState(false)
-  const [outlookImapHelpAccount, setOutlookImapHelpAccount] = React.useState<Account | null>(null)
   const { syncingAccountIds, syncNotice, startSyncing, finishSyncing, setNotice, clearSyncing } =
     useSyncFeedback()
-  const lastNotifiedSync = React.useRef<Date | undefined>(undefined)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
-  const [syncFailures, setSyncFailures] = React.useState<SyncAllFailure[]>([])
   const conversationLayout = ResizablePrimitive.useDefaultLayout({
     id: 'onemail-conversation-layout-v1',
     panelIds: ['accounts', 'conversations']
@@ -78,6 +61,11 @@ export function useMailboxWorkspaceData() {
   const warningAccount =
     accounts.find((account) => account.id === warningAccountId) ??
     (warningAccountId ? null : undefined)
+  React.useEffect(() => {
+    if (warningAccountId && warningAccount && !getAccountWarning(warningAccount, t)) {
+      setWarningAccountId(null)
+    }
+  }, [warningAccountId, warningAccount, t])
   const realAccounts = accounts.filter((account) => Boolean(account.accountId))
   const hasAccounts = realAccounts.length > 0
   const selectedAccount =
@@ -196,61 +184,32 @@ export function useMailboxWorkspaceData() {
   }, [refreshMailbox, t])
 
   React.useEffect(() => onSyncProgress((progress) => {
-    clearSyncing(String(progress.accountId))
-    if (!progress.ok) {
-      setSyncFailures((current) => [
-        ...current.filter((failure) => failure.accountId !== progress.accountId),
-        { accountId: progress.accountId, error: progress.error?.trim() || t('sync.error') }
-      ])
-    }
+    if (progress.completed !== undefined) clearSyncing(String(progress.accountId))
     setNotice((current) => current.state === 'running' ? {
       ...current,
-      message: t('mailbox.syncProgress', { completed: progress.completed, total: progress.total })
+      progress: progress.completed !== undefined && progress.total !== undefined
+        ? { completed: progress.completed, total: progress.total }
+        : current.progress,
+      activity: progress.stage || progress.completed !== undefined ? {
+        account: accounts.find((account) => account.accountId === progress.accountId)?.address ?? String(progress.accountId),
+        stage: progress.stage ?? (progress.skipped ? 'skipped' : progress.ok ? 'complete' : 'failed'),
+        folder: progress.folder
+      } : current.activity,
+      steps: progress.stage || progress.completed !== undefined ? [...(current.steps ?? []).slice(-19), {
+        account: accounts.find((account) => account.accountId === progress.accountId)?.address ?? String(progress.accountId),
+        stage: progress.stage ?? (progress.skipped ? 'skipped' : progress.ok ? 'complete' : 'failed'),
+        folder: progress.folder
+      }] : current.steps,
+      message: progress.completed !== undefined && progress.total !== undefined
+        ? t('mailbox.syncProgress', { completed: progress.completed, total: progress.total })
+        : current.message
     } : current)
-  }), [clearSyncing, setNotice, t])
-
-  React.useEffect(() => {
-    return onNewMail((notification) => {
-      const platform = document.documentElement.dataset.platform
-      const account = accounts.find((item) => item.accountId === notification.accountId)
-      const provider = normalizeProviderKey(account?.providerKey === 'custom'
-        ? notification.accountEmail?.split('@')[1]
-        : account?.providerKey ?? notification.accountEmail?.split('@')[1])
-      void showNewMailSystemNotification(
-        notification,
-        {
-          title: t('notification.newMail.title'),
-          countTitle: t('notification.newMail.countTitle', {
-            count: notification.messageCount
-          }),
-          noSubject: t('common.noSubject'),
-          unknownSender: t('common.unknownSender')
-        },
-        platform === 'macos' || platform === 'windows' ? platform : 'linux',
-        provider
-      ).catch((notificationError) => {
-        console.warn('Failed to show the new-mail system notification.', notificationError)
-      })
-    })
-  }, [accounts, t])
+  }), [accounts, clearSyncing, setNotice, t])
 
   React.useEffect(() => onSystemNotificationOpen((messageId) => {
     setSelectedAccountId('all')
     setOpenMessageId(messageId)
   }), [])
-
-  React.useEffect(() => {
-    if (syncNotice.state !== 'success' || !syncNotice.finishedAt) return
-    if (lastNotifiedSync.current === syncNotice.finishedAt) return
-    lastNotifiedSync.current = syncNotice.finishedAt
-    void showSyncCompleteSystemNotification(
-      t('sync.success'),
-      `${syncNotice.label} · ${t('status.syncDuration', { seconds: Math.max(1, Math.round((syncNotice.finishedAt.getTime() - (syncNotice.startedAt?.getTime() ?? syncNotice.finishedAt.getTime())) / 1000)) })}`
-    ).catch((notificationError) => {
-      console.warn('Failed to show the sync completion notification.', notificationError)
-      toast.error(t('notification.systemDeliveryFailed'))
-    })
-  }, [syncNotice, t])
 
   React.useEffect(() => {
     let cancelled = false
@@ -271,6 +230,30 @@ export function useMailboxWorkspaceData() {
     }
   }, [])
 
+  React.useEffect(() => {
+    let active = true
+    const stops: Array<() => void> = []
+    void Promise.all([
+      listen<AppSettings>('settings/changed', (event) => {
+        setSettings(event.payload)
+        setLocale(normalizeLocale(event.payload.locale))
+      }),
+      listen('ai/settingsChanged', () => {
+        void loadAiSettings().then((next) => { if (active) setAiSettings(next) })
+          .catch((reason) => console.warn('Failed to refresh AI settings.', reason))
+      }),
+      listen('settings/backupImported', () => {
+        void reloadAfterBackupImport().catch((reason) =>
+          setError(getErrorMessage(reason, t('mailbox.loadDataError')))
+        )
+      })
+    ]).then((listeners) => {
+      if (active) stops.push(...listeners)
+      else listeners.forEach((stop) => stop())
+    }).catch((reason) => console.warn('Failed to subscribe to settings updates.', reason))
+    return () => { active = false; stops.forEach((stop) => stop()) }
+  }, [reloadAfterBackupImport, setLocale, t])
+
   const syncCreatedAccountInBackground = React.useCallback(
     (accountId: number, accountEmail: string, startedAt: Date): void => {
       const accountKey = String(accountId)
@@ -282,24 +265,32 @@ export function useMailboxWorkspaceData() {
 
       void syncAccount(accountId, 'initial')
         .then(async (syncResult) => {
+          if (syncResult.ok === false) {
+            throw new Error(syncResult.error || t('mailbox.syncAccountError'))
+          }
           await refreshMailbox()
           finishSyncing(accountKey, 'success', {
             label: accountEmail,
             startedAt,
             message: t('mailbox.initialSyncComplete', {
               email: accountEmail,
-              inserted: syncResult.insertedCount,
-              scanned: syncResult.scannedCount
+              inserted: syncResult.insertedCount ?? 0,
+              scanned: syncResult.scannedCount ?? 0
             })
           })
         })
-        .catch((syncError) => {
+        .catch(async (syncError) => {
           const message = getErrorMessage(syncError, t('mailbox.syncAccountError'))
-          const account = accounts.find((item) => item.accountId === accountId)
-          if (shouldShowOutlookImapHelp(message, account)) {
-            setOutlookImapHelpAccount(account ?? createOutlookHelpAccount(accountId, accountEmail))
+          try {
+            await refreshAccounts()
+          } catch {
+            setAccounts((current) => current.map((account) => account.accountId === accountId ? {
+              ...account,
+              status: account.connectionStatus === 'reauthorize' ? 'auth_error' : 'sync_error',
+              lastError: message
+            } : account))
           }
-          setError(message)
+          setWarningAccountId(accountKey)
           finishSyncing(accountKey, 'error', {
             label: accountEmail,
             startedAt,
@@ -308,8 +299,8 @@ export function useMailboxWorkspaceData() {
         })
     },
     [
-      accounts,
       finishSyncing,
+      refreshAccounts,
       refreshMailbox,
       startSyncing,
       t
@@ -367,7 +358,6 @@ export function useMailboxWorkspaceData() {
     finishSyncing,
     handleRefreshOutbox,
     hasAccounts,
-    lastNotifiedSync,
     loading,
     openComposer,
     openMessageId,
@@ -375,7 +365,6 @@ export function useMailboxWorkspaceData() {
     outboxMessages,
     outboxOpen,
     outboxPending,
-    outlookImapHelpAccount,
     realAccounts,
     refreshAccounts,
     refreshMailbox,
@@ -401,21 +390,16 @@ export function useMailboxWorkspaceData() {
     setOutboxMessages,
     setOutboxOpen,
     setOutboxPending,
-    setOutlookImapHelpAccount,
     setOpenMessageId,
     setSelectedAccountId,
     setSettings,
-    setSettingsInitialSection,
-    setSyncFailures,
     setSystemInfo,
     setUpdateStatus,
     setWarningAccountId,
     settings,
-    settingsInitialSection,
     showNoAccounts,
     startSyncing,
     syncCreatedAccountInBackground,
-    syncFailures,
     syncNotice,
     syncingAccountIds,
     systemInfo,
