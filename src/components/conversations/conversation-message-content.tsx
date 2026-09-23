@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react'
-import { ChevronDown, ChevronUp, Loader2 } from 'lucide-react'
+import { ChevronDown, ChevronUp, Image, ImageOff, Loader2 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
+import { ResponsiveDialog } from '@renderer/components/responsive-dialog'
 import { prepareMailHtml } from '@renderer/components/mail/mail-html'
-import { conversationHtmlToText, conversationLinkUrl, conversationTextParts, type ConversationTextLink } from './conversation-text'
+import {
+  conversationHtmlToText,
+  conversationLinkUrl,
+  conversationTextParts,
+  type ConversationTextLink,
+} from './conversation-text'
 import { openExternalUrl } from '@renderer/lib/api'
 import { toast } from 'sonner'
 import { useI18n } from '@renderer/lib/i18n'
@@ -11,6 +17,7 @@ import type { AppSettings } from '@renderer/shared/types'
 import { compactMailBodyText } from '@renderer/shared/mail-text'
 
 const COLLAPSED_HEIGHT = 240
+const IMAGE_PRIVACY_ARTICLE_URL = 'https://huzhihui.com/blog/click-load-images-ip-leak-email-tracking'
 
 export function ConversationMessageContent({ message, refresh, bodyDisplayMode, externalImagesBlocked, children }: {
   message: ConversationMessage
@@ -29,7 +36,8 @@ export function ConversationMessageContent({ message, refresh, bodyDisplayMode, 
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState(false)
   const [overflowing, setOverflowing] = useState(false)
-  const [imagesAllowed, setImagesAllowed] = useState(false)
+  const [imagePreference, setImagePreference] = useState<'default' | 'allow' | 'block'>('default')
+  const [imageWarningOpen, setImageWarningOpen] = useState(false)
   const container = useRef<HTMLDivElement>(null)
   const content = useRef<HTMLDivElement>(null)
   const marking = useRef(false)
@@ -43,13 +51,18 @@ export function ConversationMessageContent({ message, refresh, bodyDisplayMode, 
     return { body: (html ? conversationHtmlToText(html, links) : '') || plainText || '', links }
   }, [plainText, html])
   const hasBody = loadedBody !== null || Boolean(body || html)
-  const allowImages = !externalImagesBlocked || imagesAllowed
-  const prepared = useMemo(() => bodyDisplayMode === 'html' && html
-    ? prepareMailHtml(html, { allowExternalImages: allowImages })
-    : null, [bodyDisplayMode, html, allowImages])
+  const showHtml = bodyDisplayMode === 'html' || imagePreference === 'allow'
+  const allowImages = showHtml && (imagePreference === 'allow' || (imagePreference === 'default' && !externalImagesBlocked))
+  const blockedPrepared = useMemo(() => html
+    ? prepareMailHtml(html, { allowExternalImages: false })
+    : null, [html])
+  const prepared = useMemo(() => html && allowImages
+    ? prepareMailHtml(html, { allowExternalImages: true })
+    : blockedPrepared, [html, allowImages, blockedPrepared])
+  const hasExternalImages = (blockedPrepared?.blockedImageResourceCount ?? 0) > 0
 
   useEffect(() => {
-    setImagesAllowed(false)
+    setImagePreference('default')
   }, [externalImagesBlocked])
 
   useEffect(() => {
@@ -113,7 +126,7 @@ export function ConversationMessageContent({ message, refresh, bodyDisplayMode, 
   return <div ref={container} className="min-w-0" aria-busy={loading}>
     <div id={contentId} className="overflow-hidden" style={{ maxHeight: expanded ? undefined : COLLAPSED_HEIGHT, maskImage: overflowing && !expanded ? 'linear-gradient(to bottom, black calc(100% - 24px), transparent)' : undefined }}>
       <div ref={content} className="flow-root" onClick={openLink} onAuxClick={openLink}>
-        {prepared ? <div className="mail-html conversation-html text-sm" dangerouslySetInnerHTML={{ __html: prepared.html }} /> : <MessageText value={body || message.snippet || text(hasBody ? '（无文本内容）' : '正文尚未加载', hasBody ? '(No text content)' : 'Message body has not been loaded')} links={links} quoteLabel={text('展开引用与签名', 'Show quoted text and signature')} />}
+        {showHtml && prepared ? <div className="mail-html conversation-html text-sm" dangerouslySetInnerHTML={{ __html: prepared.html }} /> : <MessageText value={body || message.snippet || text(hasBody ? '（无文本内容）' : '正文尚未加载', hasBody ? '(No text content)' : 'Message body has not been loaded')} links={links} quoteLabel={text('展开引用与签名', 'Show quoted text and signature')} />}
       </div>
     </div>
     {error && <p role="alert" className="mt-2 text-xs text-destructive">{error}</p>}
@@ -121,11 +134,32 @@ export function ConversationMessageContent({ message, refresh, bodyDisplayMode, 
     {overflowing && <Button variant="ghost" size="sm" className="h-6 px-1 text-xs" aria-expanded={expanded} aria-controls={contentId} onClick={() => setExpanded(!expanded)}>
       {expanded ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}{text(expanded ? '收起正文' : '展开全文', expanded ? 'Collapse message' : 'Show full message')}
     </Button>}
-    {prepared && !allowImages && prepared.blockedImageResourceCount > 0 && <Button className="h-6 px-1 text-xs" size="sm" variant="ghost" onClick={() => setImagesAllowed(true)}>{text('加载本条图片', 'Load images for this message')}</Button>}
+    {hasExternalImages && (allowImages
+      ? <Button className="h-6 px-1 text-xs" size="sm" variant="ghost" onClick={() => setImagePreference('block')}><ImageOff className="size-3" />{text('隐藏图片', 'Hide images')}</Button>
+      : <Button className="h-6 px-1 text-xs" size="sm" variant="ghost" aria-haspopup="dialog" onClick={() => setImageWarningOpen(true)}><Image className="size-3" />{text('加载图片', 'Load images')}</Button>)}
     {loading && <span role="status" className="inline-flex h-6 items-center gap-1 text-xs text-muted-foreground"><Loader2 className="size-3 animate-spin" aria-hidden="true" />{text('加载中…', 'Loading…')}</span>}
     {!hasBody && error && !loading && <Button className="h-6 px-1 text-xs" size="sm" variant="ghost" onClick={() => void load()}>{text('重试加载', 'Retry loading')}</Button>}
     {children}
     </div>
+    <ResponsiveDialog
+      open={imageWarningOpen}
+      onOpenChange={setImageWarningOpen}
+      title={text('加载图片前请注意', 'Before loading images')}
+      description={text('远程图片可能用于追踪邮件阅读行为，请仅在信任发件人时加载。', 'Remote images may track email reading activity. Only load them if you trust the sender.')}
+      contentClassName="md:max-w-sm"
+      headerClassName="text-left"
+      bodyClassName="space-y-3 px-4 text-sm leading-6 text-muted-foreground md:px-0"
+      footer={<>
+        <Button variant="outline" onClick={() => setImageWarningOpen(false)}>{text('取消', 'Cancel')}</Button>
+        <Button onClick={() => { setImagePreference('allow'); setImageWarningOpen(false) }}>{text('仍然加载', 'Load anyway')}</Button>
+      </>}
+    >
+      <p>{text('加载图片会向发件人或图片服务商发起网络请求，可能暴露你的出口 IP、访问时间及部分设备信息。即使是不可见的追踪像素，也可能让对方知道你打开了邮件。', 'Loading images sends requests to the sender or image provider, potentially revealing your public IP address, access time, and some device information. Even invisible tracking pixels may reveal that you opened the email.')}</p>
+      <p>{text('本次确认仅对当前邮件生效，将显示包含图片的原始排版。', 'This confirmation applies only to this message and displays its original layout with images.')}</p>
+      <div onClick={openLink} onAuxClick={openLink}>
+        <a href={IMAGE_PRIVACY_ARTICLE_URL} target="_blank" rel="noopener noreferrer" className="text-primary underline underline-offset-4">{text('了解详情：加载邮件图片为何可能泄露 IP', 'Learn more: how loading email images can expose your IP')}</a>
+      </div>
+    </ResponsiveDialog>
   </div>
 }
 

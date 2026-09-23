@@ -176,6 +176,20 @@ function AccountRow({
   onResolveWarning: () => void
 }): React.JSX.Element {
   const { t } = useI18n()
+  const [spinRequested, setSpinRequested] = React.useState(false)
+  const spinTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  React.useEffect(() => () => {
+    if (spinTimer.current) clearTimeout(spinTimer.current)
+  }, [])
+  const refresh = (): void => {
+    setSpinRequested(true)
+    if (spinTimer.current) clearTimeout(spinTimer.current)
+    spinTimer.current = setTimeout(() => {
+      setSpinRequested(false)
+      spinTimer.current = null
+    }, 1100)
+    onRefresh()
+  }
   const canModify = Boolean(account.accountId)
   const warning = getAccountWarning(account, t)
   const connectionStatus = account.id === 'all' ? undefined : account.connectionStatus ?? 'connected'
@@ -211,7 +225,7 @@ function AccountRow({
             variant="secondary"
             className={cn(
               'h-[18px] min-w-[18px] rounded-full border-0 bg-black/7 px-1.5 text-[10px] tabular-nums text-foreground/75 shadow-none group-hover:hidden dark:bg-white/10',
-              syncing && 'hidden'
+              (syncing || spinRequested) && 'hidden'
             )}
           >
             {account.unread}
@@ -222,14 +236,14 @@ function AccountRow({
           aria-label={t('account.list.refreshAccount')}
           className={cn(
             'hidden size-5 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-white/60 hover:text-foreground focus-visible:inline-flex focus-visible:ring-2 focus-visible:ring-ring group-hover:inline-flex dark:hover:bg-white/10 [&_svg]:size-3',
-            syncing && 'inline-flex'
+            (syncing || spinRequested) && 'inline-flex'
           )}
           onClick={(event) => {
             event.stopPropagation()
-            onRefresh()
+            refresh()
           }}
         >
-          <RefreshCw aria-hidden="true" strokeWidth={2} />
+          <RefreshCw aria-hidden="true" strokeWidth={2} className={cn((syncing || spinRequested) && 'animate-spin [animation-duration:800ms] motion-reduce:animate-none')} />
         </button>
         <AccountStatusIndicator
           status={connectionStatus}
@@ -245,12 +259,12 @@ function AccountRow({
       <ContextMenuTrigger asChild>{rowContent}</ContextMenuTrigger>
       <ContextMenuContent className="w-36">
         <ContextMenuGroup>
-          <ContextMenuItem onSelect={warning ? onResolveWarning : onRefresh}>
+          <ContextMenuItem onSelect={warning ? onResolveWarning : refresh}>
             {warning ? <AlertTriangle strokeWidth={2} /> : <RefreshCw strokeWidth={2} />}
             {warning ? t('account.list.resolveWarning') : t('common.refresh')}
           </ContextMenuItem>
           {warning ? (
-            <ContextMenuItem onSelect={onRefresh}>
+            <ContextMenuItem onSelect={refresh}>
               <RefreshCw strokeWidth={2} />
               {t('account.list.resync')}
             </ContextMenuItem>

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{db, smtp_send, state::AppState};
+use crate::{db, mail::smtp as smtp_send, state::AppState};
 
 use super::{
     messages::get_message_detail,
@@ -58,8 +58,7 @@ pub fn compose_list_outbox(
     if !statuses.is_empty() {
         where_clause = format!(
             "status IN ({})",
-            std::iter::repeat("?")
-                .take(statuses.len())
+            std::iter::repeat_n("?", statuses.len())
                 .collect::<Vec<_>>()
                 .join(",")
         );
@@ -336,7 +335,7 @@ fn create_related_draft(state: &AppState, input: &Value, forward: bool) -> Resul
     let subject = optional_string(detail_object, "subject").unwrap_or_default();
     let account_id = optional_i64(detail_object, "accountId").unwrap_or_default();
     let from_email = optional_string(detail_object, "fromEmail").unwrap_or_default();
-    crate::mail_body::participants_need_repair(&connection, message_id)?;
+    crate::mail::body::participants_need_repair(&connection, message_id)?;
     let mut accounts = connection.prepare("SELECT LOWER(TRIM(email)) FROM onemail_mail_accounts")
         .map_err(database_error)?;
     let own_addresses = accounts.query_map([], |row| row.get::<_, String>(0))

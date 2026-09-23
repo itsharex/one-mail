@@ -1,4 +1,6 @@
 import type { AppSettings, AppUpdateStatus, SystemInfo } from '@renderer/shared/types'
+import * as React from 'react'
+import { createPortal } from 'react-dom'
 import {
   AlertCircle,
   ChevronDown,
@@ -15,6 +17,7 @@ import {
 
 import type { BackupImportDialogSource } from '@renderer/components/backup/backup-import-dialog'
 import { ThemeToggleButton } from '@renderer/components/theme/theme-toggle-button'
+import { SweepShine } from '@renderer/components/sweep-shine'
 import { Button } from '@renderer/components/ui/button'
 import {
   DropdownMenu,
@@ -231,6 +234,18 @@ export function StatusBar({
   const syncText = formatSyncNotice(syncNotice, t)
   const updateText = formatUpdateStatus(updateStatus, t)
   const hasUpdate = hasAvailableUpdate(updateStatus)
+  const [activeDetails, setActiveDetails] = React.useState<'sync' | 'update' | null>(null)
+  React.useEffect(() => {
+    if (syncNotice.state === 'error' || syncErrors.length > 0) setActiveDetails('sync')
+  }, [syncNotice.state, syncNotice.finishedAt, syncErrors.length])
+  React.useEffect(() => {
+    if (!activeDetails) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setActiveDetails(null)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [activeDetails])
   const versionLabel = systemInfo?.appVersion ? `v${systemInfo.appVersion}` : '...'
   const versionTitle =
     hasUpdate && updateStatus?.latestVersion
@@ -255,21 +270,15 @@ export function StatusBar({
     <footer className="app-drag-region native-statusbar flex h-7 shrink-0 items-center justify-end border-t px-2 text-[11px] text-muted-foreground">
       <div className="app-no-drag flex min-w-0 items-center justify-end gap-1.5 overflow-hidden">
         {syncText ? (
-          <span
-            className={cn('flex min-w-0 items-center gap-1 truncate', syncNotice.state === 'error' ? 'text-destructive' : 'text-foreground')}
-            title={syncText}
-          >
+          <button type="button" className={cn('flex min-w-0 max-w-[min(40vw,24rem)] items-center gap-1 text-left text-foreground hover:underline', syncNotice.state === 'error' && 'text-destructive')} title={syncText} aria-expanded={activeDetails === 'sync'} onClick={() => setActiveDetails(activeDetails === 'sync' ? null : 'sync')}>
             <span className={cn('size-1.5 shrink-0 rounded-full', syncNotice.state === 'error' ? 'bg-destructive' : 'bg-primary')} aria-hidden="true" />
-            {syncText}
-          </span>
+            <span className="truncate">{syncNotice.state === 'running' ? <SweepShine>{syncText}</SweepShine> : syncText}</span>
+          </button>
         ) : null}
         {updateText ? (
-          <span
-            className="max-w-52 truncate rounded-sm bg-background/60 px-1.5 text-foreground"
-            title={updateText}
-          >
-            {updateText}
-          </span>
+          <button type="button" className="max-w-[min(40vw,24rem)] truncate rounded-sm bg-background/60 px-1.5 text-left text-foreground hover:underline" title={updateText} aria-expanded={activeDetails === 'update'} onClick={() => setActiveDetails(activeDetails === 'update' ? null : 'update')}>
+            {updateStatus?.state === 'checking' || updateStatus?.state === 'downloading' || updateStatus?.state === 'installing' ? <SweepShine>{updateText}</SweepShine> : updateText}
+          </button>
         ) : null}
         {updateStatus?.state === 'downloaded' ? (
           <Button className="h-5 rounded-sm px-1.5 text-xs" size="xs" onClick={onInstallUpdate}>
@@ -305,6 +314,39 @@ export function StatusBar({
         </button>
       </div>
     </footer>
+    {activeDetails && (activeDetails === 'sync' ? syncText : updateText) ? createPortal(
+      <section role="dialog" aria-label={activeDetails === 'sync' ? t('status.syncDetails') : t('status.updateDetails')} className="fixed right-3 bottom-10 z-50 flex w-[min(20rem,calc(100vw-1.5rem))] flex-col rounded-lg border bg-popover text-popover-foreground shadow-xl">
+        <header className="flex items-center justify-between border-b px-3 py-1.5 text-xs font-medium">
+          <span>{activeDetails === 'sync' ? t('status.syncDetails') : t('status.updateDetails')}</span>
+          <Button variant="ghost" size="icon-sm" className="size-5" aria-label={t('common.close')} onClick={() => setActiveDetails(null)}><X className="size-3.5" /></Button>
+        </header>
+        <div className="max-h-48 overflow-y-auto px-3 py-2 text-xs leading-5 select-text break-words [overflow-wrap:anywhere]">
+          {activeDetails === 'sync' ? (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <span className={cn('font-medium', syncNotice.state === 'error' && 'text-destructive')}>{syncNotice.state === 'running' ? t('sync.running') : syncNotice.state === 'success' ? t('sync.success') : t('sync.error')}</span>
+                {syncNotice.startedAt && syncNotice.finishedAt && <span className="shrink-0 text-muted-foreground">{t('status.syncDuration', { seconds: Math.max(1, Math.round((syncNotice.finishedAt.getTime() - syncNotice.startedAt.getTime()) / 1000)) })}</span>}
+              </div>
+              {syncNotice.label && <p className="text-muted-foreground">{syncNotice.label}</p>}
+              {syncNotice.state === 'running' && <p><SweepShine>{syncText}</SweepShine></p>}
+              {syncNotice.state === 'success' && syncNotice.message && <p>{syncNotice.message}</p>}
+              {syncNotice.state === 'error' && <p className="text-destructive">{syncNotice.message}</p>}
+              {syncErrors.length > 0 && <ul className="space-y-1 text-destructive">{syncErrors.map((message, index) => <li key={index}>{message}</li>)}</ul>}
+            </div>
+          ) : (
+            <>
+              <p>{updateText}</p>
+              {updateStatus?.message && updateStatus.message !== updateText && <p className="text-muted-foreground">{updateStatus.message}</p>}
+            </>
+          )}
+        </div>
+        <footer className="flex justify-end gap-1.5 border-t px-3 py-1.5">
+          {activeDetails === 'update' && updateStatus?.state === 'downloaded' && <Button size="xs" onClick={onInstallUpdate}>{t('status.updateRestart')}</Button>}
+          {activeDetails === 'update' && hasUpdate && updateStatus?.state !== 'downloaded' && <Button size="xs" onClick={onOpenVersion}>{t('status.openUpdatePage')}</Button>}
+          <Button variant="outline" size="xs" onClick={() => setActiveDetails(null)}>{t('common.close')}</Button>
+        </footer>
+      </section>, document.body
+    ) : null}
     </>
   )
 }
@@ -313,7 +355,7 @@ function formatUpdateStatus(
   status: AppUpdateStatus | null,
   t: ReturnType<typeof useI18n>['t']
 ): string | null {
-  if (!status || status.state === 'idle') return null
+  if (!status || status.state === 'idle' || status.state === 'unsupported') return null
 
   if (status.state === 'checking') return t('status.updateChecking')
   if (status.state === 'downloading') {
@@ -328,7 +370,6 @@ function formatUpdateStatus(
   }
   if (status.state === 'not_available') return t('status.updateNotAvailable')
   if (status.state === 'error') return t('status.updateError')
-  if (status.state === 'unsupported') return t('status.updateUnsupported')
 
   return null
 }

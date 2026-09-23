@@ -88,6 +88,10 @@
   color: var(--chat-outgoing-foreground);
 }
 
+.conversation-group-avatar {
+  background: var(--muted);
+}
+
 .conversation-unread {
   background: #e84444;
   color: #fff;
@@ -150,6 +154,11 @@
   background: #fff;
   padding: 8px;
   border-radius: 3px;
+}
+
+.conversation-html [data-mail-blocked-only='true'],
+.conversation-html img[data-mail-blocked-resource='true']:not([src]):not([srcset]) {
+  display: none !important;
 }
 
 .conversation-send {

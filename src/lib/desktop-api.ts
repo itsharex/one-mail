@@ -40,7 +40,8 @@ export function createDesktopApi(): OneMailApi {
   return {
     conversations: {
       list: (query) => command('conversations_list', { query }),
-      messages: (query) => command('conversations_messages', { query })
+      messages: (query) => command('conversations_messages', { query }),
+      findMessage: (messageId) => command('conversations_find_message', { messageId })
     },
     accounts: {
       list: () => command('accounts_list'),

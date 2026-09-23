@@ -24,32 +24,75 @@ pub async fn conversations_list(state: State<'_, AppState>, query: Option<Value>
 fn conversation_page(connection: &Connection, account_id: Option<i64>, keyword: &str, limit: usize, offset: usize) -> Result<Value, String> {
     let mut summaries = Vec::new();
     for (conversation_id, (participants, messages)) in collect_conversations(connection, account_id)? {
-        let display_name = participants.iter().map(|p| {
-            p["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(p["email"].as_str().unwrap_or_default())
-        }).collect::<Vec<_>>().join(", ");
+        let display_name = conversation_display_name(&participants);
         if !keyword.is_empty() && !display_name.to_lowercase().contains(keyword)
             && !participants.iter().any(|p| text(p, "email").contains(keyword))
             && !messages.iter().any(|m| text(m, "subject").to_lowercase().contains(keyword)
                 || text(m, "snippet").to_lowercase().contains(keyword)) {
             continue;
         }
-        let account_ids: BTreeSet<i64> = messages.iter().filter_map(|m| m["accountId"].as_i64()).collect();
-        summaries.push(json!({
-            "conversationId": conversation_id,
-            "displayName": display_name,
-            "isGroup": participants.len() > 1,
-            "participants": participants,
-            "lastMessage": messages.first(),
-            "messageCount": messages.len(),
-            "unreadCount": messages.iter().filter(|m| m["direction"] == "incoming" && m["isRead"] == false).count(),
-            "accountIds": account_ids,
-        }));
+        summaries.push(conversation_summary(conversation_id, participants, messages, display_name));
     }
     summaries.sort_by_cached_key(|summary| (
         Reverse(message_timestamp(&summary["lastMessage"])),
         text(summary, "conversationId").to_owned(),
     ));
     Ok(Value::Array(summaries.into_iter().skip(offset).take(limit).collect()))
+}
+
+#[tauri::command]
+pub async fn conversations_find_message(state: State<'_, AppState>, message_id: i64) -> Result<Option<Value>, String> {
+    if message_id <= 0 { return Ok(None); }
+    let path = state.database_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection = db::open_path(&path)?;
+        find_message_location(&connection, message_id)
+    }).await.map_err(|error| format!("定位邮件失败：{error}"))?
+}
+
+fn find_message_location(connection: &Connection, message_id: i64) -> Result<Option<Value>, String> {
+    let identity: Option<(i64, Option<String>)> = connection.query_row(
+        "SELECT account_id,rfc822_message_id FROM onemail_mail_messages WHERE message_id=?1",
+        [message_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(database_error)?;
+    let Some((account_id, rfc_id)) = identity else { return Ok(None); };
+    for (conversation_id, (participants, messages)) in collect_conversations(connection, None)? {
+        if let Some(offset) = messages.iter().position(|message| {
+            message["messageId"].as_i64() == Some(message_id) ||
+                (rfc_id.as_deref().filter(|id| !id.is_empty()).is_some_and(|id|
+                    message["messageRfc822Id"].as_str() == Some(id))
+                    && message["accountId"].as_i64() == Some(account_id))
+        }) {
+            let display_name = conversation_display_name(&participants);
+            return Ok(Some(json!({
+                "conversation": conversation_summary(conversation_id, participants, messages, display_name),
+                "offset": offset
+            })));
+        }
+    }
+    Ok(None)
+}
+
+fn conversation_display_name(participants: &[Value]) -> String {
+    participants.iter().map(|person| {
+        person["name"].as_str().filter(|name| !name.is_empty())
+            .unwrap_or(person["email"].as_str().unwrap_or_default())
+    }).collect::<Vec<_>>().join(", ")
+}
+
+fn conversation_summary(conversation_id: String, participants: Vec<Value>, messages: Vec<Value>, display_name: String) -> Value {
+    let account_ids: BTreeSet<i64> = messages.iter().filter_map(|message| message["accountId"].as_i64()).collect();
+    json!({
+        "conversationId": conversation_id,
+        "displayName": display_name,
+        "isGroup": participants.len() > 1,
+        "participants": participants,
+        "lastMessage": messages.first(),
+        "messageCount": messages.len(),
+        "unreadCount": messages.iter().filter(|message| message["direction"] == "incoming" && message["isRead"] == false).count(),
+        "accountIds": account_ids,
+    })
 }
 
 #[tauri::command]
@@ -294,6 +337,9 @@ mod tests {
         let messages = &conversations["person:alice@example.test"].1;
         assert_eq!(messages[0]["messageId"], 2);
         assert_eq!(messages[1]["messageId"], 1);
+        let location = find_message_location(&connection, 1).unwrap().unwrap();
+        assert_eq!(location["conversation"]["conversationId"], "person:alice@example.test");
+        assert_eq!(location["offset"], 1);
     }
 
     #[test]

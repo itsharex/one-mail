@@ -1,11 +1,12 @@
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::{mail_sync, state::AppState};
+use crate::{mail::sync as mail_sync, state::AppState};
 
 #[tauri::command]
-pub fn sync_status() -> Value {
-    json!({ "running": false, "accountIds": [] })
+pub fn sync_status(state: State<'_, AppState>) -> Result<Value, String> {
+    let account_ids = state.sync_tracker.account_ids()?;
+    Ok(json!({ "running": !account_ids.is_empty(), "accountIds": account_ids }))
 }
 
 #[tauri::command]

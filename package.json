@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
+    "tauri:dev": "node scripts/prepare-dev-notifier.mjs && tauri dev --config src-tauri/tauri.dev.conf.json",
     "tauri:build": "tauri build"
   },
   "dependencies": {
@@ -21,7 +21,6 @@
     "@tanstack/react-table": "^8.21.3",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
-    "@tauri-apps/plugin-notification": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-os": "^2",
     "@tauri-apps/plugin-process": "^2",

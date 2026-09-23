@@ -33,6 +33,7 @@ export type ConversationSummary = {
   displayName: string
   participants: ConversationAddress[]
   isGroup: boolean
+  iconUrl?: string | null
   lastMessage: ConversationMessage
   messageCount: number
   unreadCount: number
@@ -51,4 +52,9 @@ export type ConversationMessagesQuery = {
   accountId?: number
   limit?: number
   offset?: number
+}
+
+export type ConversationLocation = {
+  conversation: ConversationSummary
+  offset: number
 }
