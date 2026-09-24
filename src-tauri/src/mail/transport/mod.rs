@@ -235,6 +235,7 @@ pub async fn fetch_raw_message(
     if uid == 0 {
         return Err("邮件 UID 无效。".to_string());
     }
+    let _network_request = state.network_activity.begin_for_account("body", account.account_id);
     let mut session = connect_authenticated(state, account).await?;
     session
         .select(folder_path)

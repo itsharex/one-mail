@@ -1,5 +1,4 @@
 import { resourceAttributes, toBlockedAttribute, isSafeHref, isSafeResourceValue, normalizeRestoredResourceValue, isSafeResourceUrl, isSafeStyle, styleLoadsResource } from './mail-html-resources'
-import { compactMailBodyText } from '@renderer/shared/mail-text'
 
 export type PreparedMailHtml = {
   html: string
@@ -34,14 +33,6 @@ const removedElementSelector = [
   'svg',
   'math'
 ].join(',')
-
-export function mailHtmlToText(html: string): string {
-  const document = new DOMParser().parseFromString(html, 'text/html')
-  document.querySelectorAll('script,style,head').forEach((element) => element.remove())
-  document.querySelectorAll('br').forEach((element) => element.replaceWith('\n'))
-  document.querySelectorAll('p,div,tr,li').forEach((element) => element.append('\n'))
-  return compactMailBodyText(document.body.textContent || '')
-}
 
 const blockedResourceOnlyContainerSelector = [
   'a',

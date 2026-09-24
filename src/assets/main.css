@@ -18,6 +18,7 @@
   --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --color-info: var(--info);
   --color-warning: var(--warning);
   --color-warning-foreground: var(--warning-foreground);
   --color-destructive: var(--destructive);
@@ -35,16 +36,16 @@
   --radius: 0.625rem;
   --app-titlebar-left-offset: 8px;
   --app-window-controls-width: 0px;
-  --native-sidebar: oklch(0.91 0.034 308);
-  --native-toolbar: oklch(0.985 0.004 286 / 94%);
-  --native-statusbar: oklch(0.965 0.008 290 / 92%);
+  --native-sidebar: oklch(0.93 0.025 255);
+  --native-toolbar: oklch(0.985 0.004 255 / 94%);
+  --native-statusbar: oklch(0.965 0.008 255 / 92%);
   --background: oklch(0.995 0.002 286);
   --foreground: oklch(0.19 0.008 286);
   --card: oklch(0.995 0.002 286);
   --card-foreground: oklch(0.19 0.008 286);
   --popover: oklch(0.995 0.002 286);
   --popover-foreground: oklch(0.19 0.008 286);
-  --primary: oklch(0.5907 0.2061 256.79);
+  --primary: #2d70d2;
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.955 0.008 286);
   --secondary-foreground: oklch(0.205 0 0);
@@ -52,13 +53,14 @@
   --muted-foreground: oklch(0.52 0.012 286);
   --accent: oklch(0.955 0.008 286);
   --accent-foreground: oklch(0.205 0 0);
+  --info: oklch(0.53 0.13 222);
   --warning: oklch(0.769 0.188 70.08);
   --warning-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.985 0 0);
   --border: oklch(0.89 0.008 286);
   --input: oklch(0.89 0.008 286);
-  --ring: oklch(0.5907 0.2061 256.79);
+  --ring: #2d70d2;
 }
 
 :root[data-platform='macos'] {
@@ -77,16 +79,16 @@
 }
 
 .dark {
-  --native-sidebar: oklch(0.24 0.025 303);
-  --native-toolbar: oklch(0.19 0.012 286 / 94%);
-  --native-statusbar: oklch(0.18 0.012 286 / 94%);
+  --native-sidebar: oklch(0.24 0.025 255);
+  --native-toolbar: oklch(0.19 0.012 255 / 94%);
+  --native-statusbar: oklch(0.18 0.012 255 / 94%);
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.205 0 0);
   --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.5907 0.2061 256.79);
+  --primary: #2d70d2;
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);
@@ -94,13 +96,14 @@
   --muted-foreground: oklch(0.708 0 0);
   --accent: oklch(0.269 0 0);
   --accent-foreground: oklch(0.985 0 0);
+  --info: oklch(0.78 0.11 222);
   --warning: oklch(0.769 0.188 70.08);
   --warning-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
   --destructive-foreground: oklch(0.985 0 0);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.5907 0.2061 256.79);
+  --ring: #2d70d2;
 }
 
 @layer base {
@@ -182,11 +185,35 @@
   .mail-html canvas,
   .mail-html svg {
     max-width: 100% !important;
+  }
+
+  .mail-html img:not([height]),
+  .mail-html video,
+  .mail-html canvas,
+  .mail-html svg {
     height: auto;
   }
 
   .mail-html table {
     max-width: 100% !important;
+  }
+
+  .mail-html.original-message-html {
+    min-width: 100%;
+    overflow-wrap: normal;
+    color: #222;
+    background: #fff;
+    padding: 8px;
+    border-radius: 3px;
+  }
+
+  .mail-html.original-message-html table {
+    max-width: none !important;
+  }
+
+  .original-message-html [data-mail-blocked-only='true'],
+  .original-message-html img[data-mail-blocked-resource='true']:not([src]):not([srcset]) {
+    display: none !important;
   }
 
   .app-drag-region:active {

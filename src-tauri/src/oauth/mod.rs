@@ -16,7 +16,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tokio::net::TcpListener;
 use url::form_urlencoded::Serializer;
 
@@ -131,7 +131,7 @@ pub trait OAuthProvider: Send + Sync {
 pub async fn authorize(
     provider_key: &str,
     login_hint: Option<&str>,
-    _app: Option<&AppHandle>,
+    app: Option<&AppHandle>,
 ) -> Result<AuthorizedAccount, String> {
     let provider = provider_for(provider_key)?;
     let client_id = provider.client_id()?;
@@ -169,6 +169,8 @@ pub async fn authorize(
         .timeout(Duration::from_secs(60))
         .build()
         .map_err(|error| format!("创建 OAuth 请求客户端失败：{error}"))?;
+    let activity_state = app.and_then(|handle| handle.try_state::<AppState>());
+    let _network_request = activity_state.as_ref().map(|state| state.network_activity.begin("oauth"));
     let token = provider
         .exchange_code(&client, &code, &verifier, &redirect_uri)
         .await?;
@@ -284,7 +286,10 @@ async fn refresh_access_token(
         .timeout(Duration::from_secs(60))
         .build()
         .map_err(|error| format!("创建 OAuth 请求客户端失败：{error}"))?;
-    match provider.refresh(&client, refresh_token, &current).await {
+    let _network_request = state.network_activity.begin_for_account("oauth", account_id);
+    let refresh_result = provider.refresh(&client, refresh_token, &current).await;
+    drop(_network_request);
+    match refresh_result {
         Ok(token) => {
             save_token(state, account_id, provider_key, &token, provider.scopes())?;
             Ok(token)

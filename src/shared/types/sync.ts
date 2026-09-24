@@ -1,11 +1,5 @@
 import type { AccountConnectionStatus, AccountStatus, SyncMode } from './accounts'
 
-export type SyncStatus = {
-  running: boolean
-  accountIds: number[]
-  lastStartedAt?: string
-}
-
 export type AccountSyncRunItem = {
   accountId: number
   email?: string
@@ -66,8 +60,4 @@ export type NewMailNotification = {
   messageCount: number
   messages: NewMailNotificationMessage[]
   notifiedAt: string
-}
-
-export type NotificationStatus = {
-  desktopSupported: boolean
 }

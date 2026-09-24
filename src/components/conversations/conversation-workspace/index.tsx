@@ -1,52 +1,76 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from '@tauri-apps/api/core';
 import { emitTo, listen } from '@tauri-apps/api/event';
 import { formatAbsoluteTime, formatRelativeTime } from "@renderer/components/mail/date-format";
 import { Loader2, MessageCircle, Plus, Search } from "lucide-react";
 import { Button } from "@renderer/components/ui/button";
-import { Input } from "@renderer/components/ui/input";
+import { Badge } from "@renderer/components/ui/badge";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@renderer/components/ui/dropdown-menu";
 import { Skeleton } from "@renderer/components/ui/skeleton";
-import { CopyableText } from "@renderer/components/ui/copyable-text";
+import { CopyButton } from "@renderer/components/ui/copy-button";
 import { Account } from "@renderer/components/mail/types";
 import { useI18n } from "@renderer/lib/i18n";
 import { startWindowDrag } from "@renderer/lib/window-drag";
 import { cn } from "@renderer/lib/utils";
-import { useConversations } from "../use-conversations";
+import { useConversations, type ConversationTimeFilter } from "../use-conversations";
 import { toast } from "sonner";
-import { AppSettings } from "@renderer/shared/types";
-import type { ConversationMessage } from "@renderer/shared/conversations";
+import type { AiChatInput, AiChatResult, AiSettings, AppSettings } from "@renderer/shared/types";
+import type { ConversationAddress, ConversationMessage } from "@renderer/shared/conversations";
 import '../conversation-workspace.css';
 import { ConversationPane } from './conversation-pane';
 import { ConversationAvatar } from './conversation-avatar';
+import { GlobalSearchDialog } from './global-search-dialog';
 
 export type ConversationWorkspaceProps = {
   accounts: Account[];
   settings: AppSettings | null;
   accountId?: number;
+  databasePath?: string;
+  onSelectAccount: (accountId: string) => void;
+  onAddAccount: () => void;
   onCompose: () => void;
   onOpenOutbox: () => void;
   refreshKey?: number;
   openMessageId?: number | null;
   onOpenMessageHandled?: () => void;
-  onAskAi?: (message: ConversationMessage) => void;
+  aiSettings?: AiSettings;
+  onAiChat?: (input: AiChatInput) => Promise<AiChatResult>;
 };
+
+function participantLabel(person: ConversationAddress): string {
+  const name = person.name?.trim();
+  if (name && name.toLowerCase() !== person.email.toLowerCase()) return name;
+  const domain = person.email.split("@")[1]?.split(".");
+  return domain?.at(-2) || domain?.[0] || person.email;
+}
 
 export function ConversationWorkspace({
   accounts,
   settings,
   accountId,
+  databasePath,
+  onSelectAccount,
+  onAddAccount,
   onCompose,
   onOpenOutbox,
   refreshKey,
   openMessageId,
   onOpenMessageHandled,
-  onAskAi,
+  aiSettings,
+  onAiChat,
 }: ConversationWorkspaceProps) {
   const { locale } = useI18n();
   const zh = locale === "zh-CN";
   const text = (cn: string, en: string) => (zh ? cn : en);
   const state = useConversations(accountId, refreshKey);
+  const [searchOpen, setSearchOpen] = useState(false);
   const selected = state.selected;
+  const timeFilters: { value: ConversationTimeFilter; label: string }[] = [
+    { value: "all", label: text("全部时间", "All time") },
+    { value: "today", label: text("今天", "Today") },
+    { value: "yesterday", label: text("昨天", "Yesterday") },
+    { value: "last3", label: text("近三天", "Last 3 days") },
+  ];
   const listRoot = useRef<HTMLDivElement>(null);
   const loadMoreTarget = useRef<HTMLDivElement>(null);
   const openingMessageId = useRef<number | null>(null);
@@ -65,7 +89,7 @@ export function ConversationWorkspace({
 
   function openOriginal(message: ConversationMessage): void {
     originalMessage.current = message;
-    void invoke('original_message_open_window')
+    void invoke('original_message_open_window', { subject: message.subject })
       .then(() => emitTo('original-message', 'original/message', message))
       .catch((reason) => toast.error(String(reason)));
   }
@@ -124,31 +148,63 @@ export function ConversationWorkspace({
         )}
       >
         <div
-          className="app-drag-region flex h-12 shrink-0 items-center justify-between px-3"
+          className="app-drag-region flex h-10 shrink-0 items-center gap-1.5 px-3"
           onMouseDown={startWindowDrag}
         >
-          <h2 className="font-semibold">{text("对话", "Conversations")}</h2>
-          <div className="flex gap-1">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={onCompose}
-              title={text("新对话", "New conversation")}
-              aria-label={text("新对话", "New conversation")}
-            >
-              <Plus className="size-4" />
-            </Button>
-          </div>
+          <button type="button" className="app-no-drag flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border bg-background px-2.5 text-left text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" onClick={() => setSearchOpen(true)} aria-label={text("全局搜索", "Search all mail")}>
+            <Search className="size-3.5 shrink-0" aria-hidden="true" />
+            <span className="truncate">{text("搜索全部邮件", "Search all mail")}</span>
+            <kbd className="ml-auto hidden shrink-0 rounded border px-1 text-[10px] sm:inline-flex">⌘ K</kbd>
+          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon-sm"
+                aria-label={text("新增", "Add")}
+              >
+                <Plus className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-44">
+              <DropdownMenuItem onSelect={onAddAccount}>
+                {text("新增厂商", "Add email provider")}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={onCompose}>
+                {text("新增对话发邮件", "Start a conversation and send email")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
-        <div className="conversation-search relative mx-3 mb-2">
-          <Search className="absolute left-3 top-2.5 size-4 text-muted-foreground" />
-          <Input
-            className="pl-9"
-            value={state.keyword}
-            onChange={(event) => state.setKeyword(event.target.value)}
-            placeholder={text("搜索联系人或邮箱", "Search people or email")}
-            aria-label={text("搜索联系人或邮箱", "Search people or email")}
-          />
+        <div role="radiogroup" aria-label={text("按时间筛选对话", "Filter conversations by time")} className="mx-3 mb-1 flex flex-wrap gap-0.5">
+          {timeFilters.map((option) => {
+            const active = state.timeFilter === option.value;
+            return (
+              <Badge
+                key={option.value}
+                asChild
+                variant={active ? "default" : "outline"}
+                className={cn(
+                  "h-6 cursor-pointer rounded-full px-2.5 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring",
+                  active
+                    ? "hover:bg-primary/90"
+                    : "border-border/70 bg-background/50 text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+              >
+                <label>
+                  <input
+                    className="sr-only"
+                    type="radio"
+                    name="conversation-time-filter"
+                    value={option.value}
+                    checked={active}
+                    onChange={() => state.setTimeFilter(option.value)}
+                  />
+                  {option.label}
+                </label>
+              </Badge>
+            );
+          })}
         </div>
         <div ref={listRoot} className="min-h-0 flex-1 overflow-y-auto pb-2">
           {state.error && (
@@ -171,7 +227,11 @@ export function ConversationWorkspace({
             !state.error &&
             state.conversations.length === 0 && (
               <p className="p-4 text-center text-sm text-muted-foreground">
-                {text("暂无对话", "No conversations yet")}
+                {state.keyword
+                  ? text("没有找到匹配的对话", "No matching conversations")
+                  : state.timeFilter !== 'all'
+                  ? text("该时间段暂无对话", "No conversations in this time range")
+                  : text("暂无对话", "No conversations yet")}
               </p>
             )}
           {state.conversations.map((item) => (
@@ -210,15 +270,28 @@ export function ConversationWorkspace({
                 )}
               </div>
               <div className="pointer-events-none relative min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <CopyableText
-                    value={item.participants.map((person) => person.email).join(', ')}
-                    className="pointer-events-auto min-w-0 flex-1 text-sm font-medium"
-                  />
+                <div className="flex min-w-0 items-center gap-2">
+                  <div className="group/brand pointer-events-auto flex min-w-0 items-center gap-1">
+                    <button
+                      type="button"
+                      className="min-w-0 truncate text-left text-sm font-medium"
+                      title={item.participants.map(participantLabel).join(", ")}
+                      onClick={() => state.setSelectedId(item.conversationId)}
+                    >
+                      {item.participants.map(participantLabel).join(", ")}
+                    </button>
+                    <CopyButton
+                      value={item.participants.map((person) => person.email).join(', ')}
+                      variant="ghost"
+                      size="icon-xs"
+                      title={text("复制邮箱", "Copy email")}
+                      className="size-5 opacity-0 transition-opacity group-hover/brand:opacity-100 group-focus-within/brand:opacity-100 [@media(hover:none)]:opacity-100"
+                    />
+                  </div>
                   <time
                     dateTime={item.lastMessage.receivedAt}
                     title={formatAbsoluteTime(item.lastMessage.receivedAt)}
-                    className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground"
+                    className="ml-auto shrink-0 whitespace-nowrap text-[11px] text-muted-foreground"
                   >
                     {formatRelativeTime(item.lastMessage.receivedAt, locale)}
                   </time>
@@ -255,10 +328,12 @@ export function ConversationWorkspace({
         <ConversationPane
           key={`${accountId ?? "all"}:${selected.conversationId}`}
           conversation={selected}
-          onAskAi={onAskAi}
+          aiSettings={aiSettings}
+          onAiChat={onAiChat}
           settings={settings}
           messages={state.messages}
           focusedMessageId={state.focusedMessageId}
+          focusToken={state.focusToken}
           accounts={accounts}
           loading={state.loadingMessages}
           loadingOlder={state.loadingOlder}
@@ -290,6 +365,16 @@ export function ConversationWorkspace({
           </div>
         </div>
       )}
+      <GlobalSearchDialog
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        accounts={accounts}
+        databasePath={databasePath}
+        onNavigate={(result) => {
+          state.openSearchResult(result);
+          onSelectAccount(String(result.message.accountId));
+        }}
+      />
     </div>
   );
 }

@@ -167,10 +167,10 @@ export function useMailboxWorkspaceController() {
     const syncMessage =
       account.id === 'all'
         ? t('mailbox.syncingAll')
-        : t('mailbox.syncingAccount', { account: account.name })
+        : t('mailbox.syncingAccount', { account: account.address })
 
     startSyncing(account.id, {
-      label: account.name,
+      label: account.address,
       startedAt,
       message: syncMessage
     })
@@ -199,12 +199,12 @@ export function useMailboxWorkspaceController() {
         throw new Error(syncFailureMessage)
       }
       finishSyncing(account.id, 'success', {
-        label: account.name,
+        label: account.address,
         startedAt,
         message:
           account.id === 'all'
             ? t('mailbox.allSyncComplete')
-            : t('mailbox.accountSyncComplete', { account: account.name })
+            : t('mailbox.accountSyncComplete', { account: account.address })
       })
     } catch (refreshError) {
       const message = getErrorMessage(refreshError, t('mailbox.refreshAccountError'))
@@ -227,12 +227,12 @@ export function useMailboxWorkspaceController() {
         setError(message)
       }
       finishSyncing(account.id, 'error', {
-        label: account.name,
+        label: account.address,
         startedAt,
         message:
           account.id === 'all'
             ? t('mailbox.allSyncFailed', { message })
-            : t('mailbox.accountSyncFailed', { account: account.name, message })
+            : t('mailbox.accountSyncFailed', { account: account.address, message })
       })
     } finally {
       clearSyncing(account.id)

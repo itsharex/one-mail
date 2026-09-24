@@ -39,6 +39,7 @@ export type AiChatInput = {
 export type AiChatResult = {
   message: AiChatMessage
   model: string
+  contextTruncated?: boolean
 }
 
 export type BackupSyncProvider = 'none' | 'webdav' | 's3'
@@ -122,14 +123,6 @@ export type SystemInfo = {
 }
 
 export type AppTheme = 'light' | 'dark'
-
-export type AppUpdateCheckResult = {
-  status: 'unsupported' | 'available' | 'not_available' | 'error'
-  currentVersion: string
-  latestVersion?: string
-  releaseUrl?: string
-  message: string
-}
 
 export type AppUpdateProgress = {
   percent: number

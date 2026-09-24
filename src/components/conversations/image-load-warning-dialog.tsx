@@ -25,7 +25,7 @@ export function ImageLoadWarningDialog({ open, onOpenChange, onConfirm, text }: 
     </>}
   >
     <p>{text('加载图片会向发件人或图片服务商发起网络请求，可能暴露你的出口 IP、访问时间及部分设备信息。即使是不可见的追踪像素，也可能让对方知道你打开了邮件。', 'Loading images sends requests to the sender or image provider, potentially revealing your public IP address, access time, and some device information. Even invisible tracking pixels may reveal that you opened the email.')}</p>
-    <p>{text('本次确认仅对当前邮件生效，将显示包含图片的原始排版。', 'This confirmation applies only to this message and displays its original layout with images.')}</p>
+    <p>{text('本次确认仅对当前邮件生效，将加载这封邮件的远程图片。', 'This confirmation applies only to this message and loads its remote images.')}</p>
     <a href={IMAGE_PRIVACY_ARTICLE_URL} className="text-primary underline underline-offset-4" onClick={(event) => {
       event.preventDefault()
       void openExternalUrl(IMAGE_PRIVACY_ARTICLE_URL).catch(() => toast.error(text('无法打开链接，请稍后重试', 'Could not open the link. Try again.')))

@@ -1,17 +1,23 @@
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
 use async_imap::extensions::idle::IdleResponse;
+use chrono::{DateTime, Utc};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
 };
+#[cfg(target_os = "windows")]
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tokio::{
     sync::{watch, Semaphore},
     task::JoinHandle,
@@ -20,7 +26,10 @@ use tokio::{
 
 use crate::{
     client_log,
-    commands::data::sync::publish_sync_result,
+    commands::{
+        data::sync::{publish_sync_result, sync_start_all},
+        system,
+    },
     db,
     mail::{sync, transport},
     state::AppState,
@@ -33,23 +42,108 @@ const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const IMAP_SETUP_TIMEOUT: Duration = Duration::from_secs(30);
 const IMAP_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+static PENDING_COMPOSE: AtomicBool = AtomicBool::new(false);
 
 pub struct BackgroundWake(watch::Sender<u64>);
 
 pub fn start(app: &AppHandle) -> Result<(), String> {
-    let show = MenuItem::with_id(app, "show", "显示 OneMail", true, None::<&str>)
+    let show = MenuItem::with_id(app, "toggle", "显示/隐藏 OneMail", true, None::<&str>)
+        .map_err(|error| error.to_string())?;
+    let compose = MenuItem::with_id(app, "compose", "写邮件", true, None::<&str>)
+        .map_err(|error| error.to_string())?;
+    let sync_all = MenuItem::with_id(app, "sync_all", "立即同步全部邮箱", true, None::<&str>)
+        .map_err(|error| error.to_string())?;
+    let settings = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)
+        .map_err(|error| error.to_string())?;
+    let separator = PredefinedMenuItem::separator(app)
         .map_err(|error| error.to_string())?;
     let quit = MenuItem::with_id(app, "quit", "退出 OneMail", true, None::<&str>)
         .map_err(|error| error.to_string())?;
-    let menu = Menu::with_items(app, &[&show, &quit]).map_err(|error| error.to_string())?;
+    let menu = Menu::with_items(app, &[&show, &compose, &sync_all, &settings, &separator, &quit])
+        .map_err(|error| error.to_string())?;
+    let sync_menu_item = sync_all.clone();
     let mut tray = TrayIconBuilder::with_id("onemail")
         .menu(&menu)
         .tooltip("OneMail")
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => show_main_window(app),
+        .on_menu_event(move |app, event| match event.id.as_ref() {
+            "toggle" => toggle_main_window(app),
+            "compose" => {
+                PENDING_COMPOSE.store(true, Ordering::Release);
+                show_main_window(app);
+                if let Err(error) = app.emit_to("main", "tray/compose", ()) {
+                    eprintln!("OneMail 托盘打开写信窗口失败：{error}");
+                }
+            }
+            "sync_all" => {
+                let app = app.clone();
+                let sync_menu_item = sync_menu_item.clone();
+                let _ = sync_menu_item.set_enabled(false);
+                let _ = sync_menu_item.set_text("正在同步邮箱…");
+                tauri::async_runtime::spawn(async move {
+                    if let Some(tray) = app.tray_by_id("onemail") {
+                        let _ = tray.set_tooltip(Some("OneMail · 正在同步邮箱"));
+                    }
+                    let state = app.state::<AppState>();
+                    let tooltip = match sync_start_all(app.clone(), state, Some("refresh".to_string())).await {
+                        Ok(result) => {
+                            let failed = result["accounts"].as_array().map_or(0, |accounts| {
+                                accounts.iter().filter(|account| account["ok"] != true).count()
+                            });
+                            if failed == 0 {
+                                "OneMail · 同步完成".to_string()
+                            } else {
+                                format!("OneMail · {failed} 个邮箱未同步")
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("OneMail 托盘同步邮箱失败：{error}");
+                            "OneMail · 同步失败".to_string()
+                        }
+                    };
+                    if let Some(tray) = app.tray_by_id("onemail") {
+                        let _ = tray.set_tooltip(Some(tooltip));
+                    }
+                    let _ = sync_menu_item.set_text("立即同步全部邮箱");
+                    let _ = sync_menu_item.set_enabled(true);
+                });
+            }
+            "settings" => {
+                if let Err(error) = system::settings_open_window(app.clone(), Some("general".to_string())) {
+                    eprintln!("OneMail 托盘打开设置失败：{error}");
+                }
+            }
             "quit" => app.exit(0),
             _ => {}
         });
+    #[cfg(target_os = "macos")]
+    {
+        tray = tray
+            .icon(tauri::include_image!("./icons/tray-macos.png"))
+            .icon_as_template(true);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let scale = app.get_webview_window("main")
+            .and_then(|window| window.scale_factor().ok())
+            .unwrap_or(1.0);
+        let icon = if scale >= 1.5 {
+            tauri::include_image!("./icons/tray-windows-32.png")
+        } else {
+            tauri::include_image!("./icons/tray-windows-16.png")
+        };
+        tray = tray.icon(icon)
+            .show_menu_on_left_click(false)
+            .on_tray_icon_event(|tray, event| {
+                if matches!(event, TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }) {
+                    show_main_window(tray.app_handle());
+                }
+            });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
@@ -59,6 +153,11 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
     app.manage(BackgroundWake(sender));
     tauri::async_runtime::spawn(supervise(app.clone(), receiver));
     Ok(())
+}
+
+#[tauri::command]
+pub fn tray_take_compose_request() -> bool {
+    PENDING_COMPOSE.swap(false, Ordering::AcqRel)
 }
 
 pub fn wake(app: &AppHandle) {
@@ -73,6 +172,16 @@ pub fn show_main_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+fn toggle_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+        } else {
+            show_main_window(app);
+        }
     }
 }
 
@@ -154,7 +263,22 @@ fn reconciliation_interval(app: &AppHandle) -> Duration {
       .unwrap_or(Duration::from_secs(15 * 60))
 }
 
-fn never_synced(app: &AppHandle, account_id: i64) -> bool {
+fn reconciliation_delay(last_sync_at: Option<&str>, interval: Duration, now: DateTime<Utc>) -> Duration {
+    let Some(last_sync_at) = last_sync_at.and_then(|value| DateTime::parse_from_rfc3339(value).ok()) else {
+        return Duration::ZERO;
+    };
+    let elapsed = now.signed_duration_since(last_sync_at.with_timezone(&Utc))
+        .to_std()
+        .unwrap_or_default();
+    interval.saturating_sub(elapsed)
+}
+
+fn next_reconciliation(app: &AppHandle, account_id: i64) -> Instant {
+    let last = last_sync_at(app, account_id);
+    Instant::now() + reconciliation_delay(last.as_deref(), reconciliation_interval(app), Utc::now())
+}
+
+fn last_sync_at(app: &AppHandle, account_id: i64) -> Option<String> {
     let state = app.state::<AppState>();
     db::open(&state)
         .ok()
@@ -170,7 +294,10 @@ fn never_synced(app: &AppHandle, account_id: i64) -> bool {
                 .flatten()
         })
         .flatten()
-        .is_none()
+}
+
+fn never_synced(app: &AppHandle, account_id: i64) -> bool {
+    last_sync_at(app, account_id).is_none()
 }
 
 async fn run_account(
@@ -181,30 +308,29 @@ async fn run_account(
 ) {
     time::sleep(Duration::from_secs(account_id.rem_euclid(11) as u64)).await;
     let mut backoff = Duration::from_secs(5);
-    let mut next_full = Instant::now();
+    let mut next_full = next_reconciliation(&app, account_id);
     let mut next_folders = Instant::now() + FOLDER_POLL;
+    let mut check_inbox = false; // Reuse recent local mail on startup and wake.
     loop {
         // Reconcile before opening IDLE, including after network or system resume.
         if Instant::now() >= next_full {
             let initial = never_synced(&app, account_id);
-            if !initial {
-                run_sync(&app, account_id, "background-inbox", "poll", &sync_slots).await;
-            }
             let mode = if initial { "initial" } else { "background" };
             if !run_sync(&app, account_id, mode, "poll", &sync_slots).await {
                 tokio::select! {
                     _ = time::sleep(backoff) => {},
-                    changed = wake.changed() => { if changed.is_err() { break; } },
+                    changed = wake.changed() => { if changed.is_err() { break; } next_full = next_reconciliation(&app, account_id); },
                 }
                 backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
             }
             next_full = Instant::now() + reconciliation_interval(&app);
             next_folders = Instant::now() + FOLDER_POLL;
-        } else {
+        } else if check_inbox {
             run_sync(&app, account_id, "background-inbox", "poll", &sync_slots).await;
             run_due_folder_sync(&app, account_id, &mut next_folders, &sync_slots).await;
         }
+        check_inbox = true;
         backoff = Duration::from_secs(5);
 
         let state = app.state::<AppState>();
@@ -216,6 +342,7 @@ async fn run_account(
             }
         };
         let connect_started = Instant::now();
+        let _network_request = state.network_activity.begin_for_account("imap-monitor", account_id);
         let mut session = match time::timeout(
             IMAP_SETUP_TIMEOUT,
             transport::connect_authenticated(&state, &account),
@@ -230,9 +357,10 @@ async fn run_account(
                     Ok(Ok(_)) => unreachable!(),
                 };
                 eprintln!("OneMail 后台 IMAP 连接 {account_id} 失败：{error}");
+                check_inbox = false;
                 tokio::select! {
                     _ = time::sleep(INBOX_POLL.saturating_sub(connect_started.elapsed())) => {},
-                    changed = wake.changed() => { if changed.is_err() { break; } next_full = Instant::now(); },
+                    changed = wake.changed() => { if changed.is_err() { break; } next_full = next_reconciliation(&app, account_id); },
                 }
                 continue;
             }
@@ -252,13 +380,14 @@ async fn run_account(
             backoff = (backoff * 2).min(MAX_BACKOFF);
             continue;
         }
+        drop(_network_request);
         if !supports_idle {
             let _ = time::timeout(IMAP_COMMAND_TIMEOUT, session.logout()).await;
             let mut next_poll = Instant::now() + INBOX_POLL;
             loop {
                 tokio::select! {
                     _ = time::sleep(next_poll.saturating_duration_since(Instant::now())) => {},
-                    changed = wake.changed() => { if changed.is_err() { return; } next_full = Instant::now(); break; },
+                    changed = wake.changed() => { if changed.is_err() { return; } next_full = next_reconciliation(&app, account_id); check_inbox = false; break; },
                 }
                 if Instant::now() >= next_full {
                     break;
@@ -276,7 +405,6 @@ async fn run_account(
             if Instant::now() >= next_full || connected_at.elapsed() >= IDLE_RECONNECT {
                 break;
             }
-            let mut reason = "poll";
             let mut idle = session.take().expect("IDLE session missing").idle();
             if !matches!(
                 time::timeout(IMAP_COMMAND_TIMEOUT, idle.init()).await,
@@ -294,12 +422,11 @@ async fn run_account(
                 _ => break,
             };
             if result.is_none() {
-                next_full = Instant::now();
+                next_full = next_reconciliation(&app, account_id);
+                check_inbox = false;
                 break;
             }
-            if matches!(result.as_ref(), Some(Ok(Ok(IdleResponse::NewData(_))))) {
-                reason = "idle";
-            }
+            let has_changes = matches!(result.as_ref(), Some(Ok(Ok(IdleResponse::NewData(_)))));
             match result.unwrap() {
                 Ok(Ok(IdleResponse::NewData(_))) | Ok(Ok(IdleResponse::Timeout)) | Err(_) => {}
                 _ => break,
@@ -307,7 +434,9 @@ async fn run_account(
             if Instant::now() >= next_full {
                 break;
             }
-            run_sync(&app, account_id, "background-inbox", reason, &sync_slots).await;
+            if has_changes {
+                run_sync(&app, account_id, "background-inbox", "idle", &sync_slots).await;
+            }
             run_due_folder_sync(&app, account_id, &mut next_folders, &sync_slots).await;
         }
         // A fresh connection and a full sync recover missed IDLE events and sleep gaps.
@@ -317,7 +446,7 @@ async fn run_account(
         if connected_at.elapsed() < IDLE_RECONNECT && Instant::now() < next_full {
             tokio::select! {
                 _ = time::sleep(backoff) => {},
-                changed = wake.changed() => { if changed.is_err() { return; } next_full = Instant::now(); },
+                changed = wake.changed() => { if changed.is_err() { return; } next_full = next_reconciliation(&app, account_id); check_inbox = false; },
             }
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
@@ -373,12 +502,38 @@ async fn run_sync(
         Err(error) => json!({ "accountId": account_id, "ok": false, "error": error }),
     };
     let ok = result.get("ok").and_then(Value::as_bool).unwrap_or(false);
-    if !ok && result.get("skipped").and_then(Value::as_bool) != Some(true) {
-        let _ = client_log::write(app, &format!("WARN Background sync account {account_id} failed ({mode})"));
-    }
+    let skipped = result.get("skipped").and_then(Value::as_bool) == Some(true);
+    let (level, outcome) = if skipped { ("INFO", "skipped") } else if ok { ("INFO", "complete") } else { ("WARN", "failed") };
+    let _ = client_log::write(app, &format!("{level} Background sync account {account_id} {outcome} mode={mode} reason={reason}"));
     publish_sync_result(app, &result, Some(mode), reason);
-    ok || result
-        .get("skipped")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    let _ = app.emit("sync/backgroundResult", json!({
+        "accountId": account_id,
+        "ok": ok,
+        "skipped": skipped,
+    }));
+    ok || skipped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconciliation_delay;
+    use chrono::{DateTime, Utc};
+    use std::time::Duration;
+
+    #[test]
+    fn recent_sync_uses_cached_data_until_interval_expires() {
+        let now = DateTime::parse_from_rfc3339("2026-09-24T12:15:00Z").unwrap().with_timezone(&Utc);
+        let interval = Duration::from_secs(15 * 60);
+        assert_eq!(reconciliation_delay(Some("2026-09-24T12:10:00.000Z"), interval, now), Duration::from_secs(10 * 60));
+        assert_eq!(reconciliation_delay(Some("2026-09-24T12:00:00Z"), interval, now), Duration::ZERO);
+    }
+
+    #[test]
+    fn missing_or_invalid_sync_time_is_due_now() {
+        let now = DateTime::parse_from_rfc3339("2026-09-24T12:15:00Z").unwrap().with_timezone(&Utc);
+        let interval = Duration::from_secs(15 * 60);
+        assert_eq!(reconciliation_delay(None, interval, now), Duration::ZERO);
+        assert_eq!(reconciliation_delay(Some("invalid"), interval, now), Duration::ZERO);
+        assert_eq!(reconciliation_delay(Some("2026-09-24T12:20:00Z"), interval, now), interval);
+    }
 }

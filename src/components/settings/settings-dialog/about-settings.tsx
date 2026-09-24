@@ -1,4 +1,4 @@
-import { BadgeInfo, Bug, ExternalLink, FolderOpen, RotateCw } from 'lucide-react'
+import { BadgeInfo, Bug, Database, ExternalLink, FolderOpen, RotateCw } from 'lucide-react'
 import * as React from 'react'
 import { useForm } from 'react-hook-form'
 import { Button } from '@renderer/components/ui/button'
@@ -44,6 +44,7 @@ export function AboutSettings({ systemInfo, updateStatus, form }: {
     <SettingsGroup title={t('settings.about.maintenance')}>
       <FieldGroup className={SETTINGS_LIST_CLASS}>
         <SettingRow icon={RotateCw} title={t('settings.about.reloadClient')} description={t('settings.about.reloadDescription')} control={<Button variant="outline" size="sm" onClick={() => void run(window.api.system.reloadClient)}>{t('settings.about.reloadAction')}</Button>} />
+        <SettingRow icon={Database} title={t('settings.about.localDatabase')} description={systemInfo?.databasePath ? <button type="button" className="inline-block max-w-[min(24rem,50vw)] truncate align-bottom font-mono text-left hover:underline" title={systemInfo.databasePath} onClick={() => void run(window.api.system.openDatabaseDirectory)}>{systemInfo.databasePath}</button> : t('common.loading')} control={<Button variant="outline" size="sm" disabled={!systemInfo?.databasePath} onClick={() => void run(window.api.system.openDatabaseDirectory)}>{t('settings.about.openDatabaseFolder')}</Button>} />
         <SettingRow icon={FolderOpen} title={t('settings.about.clientLogs')} description={t('settings.about.logsDescription')} control={<Button variant="outline" size="sm" onClick={() => void run(window.api.system.revealLogs)}>{t('settings.about.openLogs')}</Button>} />
         <SettingRow icon={FolderOpen} title={t('settings.about.logRetention')} description={t('settings.about.logRetentionDescription')} control={<Input className="h-8 w-20 text-xs" type="number" min={1} max={365} aria-label={t('settings.about.logRetention')} aria-invalid={Boolean(form.formState.errors.logRetentionDays)} {...form.register('logRetentionDays', { valueAsNumber: true })} />} error={form.formState.errors.logRetentionDays?.message} invalid={Boolean(form.formState.errors.logRetentionDays)} />
       </FieldGroup>

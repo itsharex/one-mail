@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { gsap } from "gsap";
 import { formatAbsoluteTime, formatRelativeTime } from "@renderer/components/mail/date-format";
-import { ArrowLeft, FileText, Reply, Sparkles, Users } from "lucide-react";
+import { ArrowLeft, ChevronDown, CircleAlert, Copy, Reply, Users } from "lucide-react";
 import { Button } from "@renderer/components/ui/button";
+import { copyTextToClipboard } from "@renderer/components/ui/copy-button";
 import { Skeleton } from "@renderer/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@renderer/components/ui/tooltip";
 import { CopyableText } from "@renderer/components/ui/copyable-text";
 import {
   ContextMenu,
@@ -22,12 +23,15 @@ import { AppSettings } from "@renderer/shared/types";
 import { ConversationAvatar } from './conversation-avatar';
 import { ConversationDialogs } from './conversation-dialogs';
 import { ConversationComposer } from './conversation-composer';
+import { ConversationAiMenu, ConversationAiResult, type ConversationAiSelection } from './conversation-ai-actions';
+import type { AiChatInput, AiChatResult, AiSettings } from '@renderer/shared/types';
 
 export function ConversationPane({
   conversation,
   settings,
   messages,
   focusedMessageId,
+  focusToken,
   accounts,
   loading,
   loadingOlder,
@@ -38,12 +42,14 @@ export function ConversationPane({
   onOpenOutbox,
   onOpenOriginal,
   refresh,
-  onAskAi,
+  aiSettings,
+  onAiChat,
 }: {
   settings: AppSettings | null;
   conversation: ConversationSummary;
   messages: ConversationMessage[];
-  focusedMessageId: number | null;
+  focusedMessageId: string | null;
+  focusToken: number;
   accounts: Account[];
   loading: boolean;
   loadingOlder: boolean;
@@ -54,9 +60,10 @@ export function ConversationPane({
   onOpenOutbox: () => void;
   onOpenOriginal: (message: ConversationMessage) => void;
   refresh: () => void;
-  onAskAi?: (message: ConversationMessage) => void;
+  aiSettings?: AiSettings;
+  onAiChat?: (input: AiChatInput) => Promise<AiChatResult>;
 }) {
-  const { locale } = useI18n();
+  const { locale, t } = useI18n();
   const text = (cn: string, en: string) => (locale === "zh-CN" ? cn : en);
   const [replyTarget, setReplyTarget] = useState<ConversationMessage | null>(
     null,
@@ -72,6 +79,7 @@ export function ConversationPane({
   const [preparing, setPreparing] = useState(false);
   const [sendError, setSendError] = useState("");
   const [notice, setNotice] = useState("");
+  const [aiInsight, setAiInsight] = useState<ConversationAiSelection | null>(null);
   const replyMessage = replyTarget ?? messages[0];
   const replyInput = useRef<HTMLTextAreaElement>(null);
   const focusReplyInput = useRef(false);
@@ -79,30 +87,23 @@ export function ConversationPane({
     conversation.lastMessage.accountId,
   );
   const scrollArea = useRef<HTMLDivElement>(null);
-  const paneRef = useRef<HTMLElement>(null);
-  useLayoutEffect(() => {
-    if (
-      !paneRef.current ||
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    )
-      return;
-    const context = gsap.context(() => {
-      gsap.fromTo(
-        paneRef.current,
-        { opacity: 0, x: 12 },
-        {
-          opacity: 1,
-          x: 0,
-          duration: 0.24,
-          ease: "power3.out",
-          clearProps: "opacity,transform",
-        },
-      );
-    }, paneRef);
-    return () => context.revert();
+  const scrollContent = useRef<HTMLDivElement>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const updateScrollToBottom = () => {
+    const area = scrollArea.current;
+    if (area) setShowScrollToBottom(area.scrollHeight - area.scrollTop - area.clientHeight > 2);
+  };
+  useEffect(() => {
+    const area = scrollArea.current;
+    const content = scrollContent.current;
+    if (!area || !content) return;
+    const observer = new ResizeObserver(updateScrollToBottom);
+    observer.observe(area);
+    observer.observe(content);
+    return () => observer.disconnect();
   }, []);
   const latestId = messages[0]?.id;
-  const focusedMessageLoaded = messages.some((message) => message.messageId === focusedMessageId);
+  const focusedMessageLoaded = messages.some((message) => message.id === focusedMessageId);
   useLayoutEffect(() => {
     const area = scrollArea.current;
     if (area && latestId && !focusedMessageId) area.scrollTop = area.scrollHeight;
@@ -110,12 +111,16 @@ export function ConversationPane({
   useLayoutEffect(() => {
     const area = scrollArea.current;
     if (!area || !focusedMessageId || !focusedMessageLoaded) return;
-    const target = area.querySelector(`[data-message-id="${focusedMessageId}"]`);
+    const target = Array.from(area.querySelectorAll<HTMLElement>('[data-message-id]'))
+      .find((element) => element.dataset.messageId === focusedMessageId);
     if (!target) return;
     const areaRect = area.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
     area.scrollTop += targetRect.top - areaRect.top - (areaRect.height - targetRect.height) / 2;
-  }, [focusedMessageId, focusedMessageLoaded]);
+    target.classList.remove('conversation-focus-flash');
+    void target.offsetWidth;
+    target.classList.add('conversation-focus-flash');
+  }, [focusedMessageId, focusedMessageLoaded, focusToken]);
   useEffect(() => {
     let cancelled = false;
     setDraft(null);
@@ -231,9 +236,10 @@ export function ConversationPane({
 
   const chronological = [...messages].reverse();
   const participantEmails = conversation.participants.map((person) => person.email).join(', ');
+  const senderAccountId = newTopic ? newAccountId : replyMessage?.accountId ?? conversation.lastMessage.accountId;
+  const senderEmail = accounts.find((account) => account.accountId === senderAccountId)?.address;
   return (
     <section
-      ref={paneRef}
       className="conversation-pane flex min-h-0 min-w-0 flex-1 flex-col"
     >
       <header
@@ -261,7 +267,9 @@ export function ConversationPane({
           <Users className="size-4" aria-hidden="true" />
         </Button>
       </header>
-      <div ref={scrollArea} className="min-h-0 flex-1 overflow-y-auto px-5 py-4 [scrollbar-gutter:stable]">
+      <div className="relative flex min-h-0 flex-1 flex-col">
+      <div ref={scrollArea} onScroll={updateScrollToBottom} className="min-h-0 flex-1 overflow-y-auto px-5 py-4 [scrollbar-gutter:stable]">
+        <div ref={scrollContent}>
         {hasOlder && (
           <div className="text-center">
             <Button
@@ -304,11 +312,11 @@ export function ConversationPane({
               </div>
             )}
             <article
-              data-message-id={message.messageId ?? undefined}
+              data-message-id={message.id}
               className={cn(
-                "mb-5 flex items-start gap-3",
+                "conversation-message mb-5 flex items-start gap-3",
                 message.direction === "outgoing" && "flex-row-reverse",
-                focusedMessageId === message.messageId && "rounded-lg bg-primary/5 ring-1 ring-primary/25",
+                focusedMessageId === message.id && "rounded-lg bg-primary/5 ring-1 ring-primary/25",
               )}
             >
               <ConversationAvatar
@@ -324,7 +332,7 @@ export function ConversationPane({
               />
               <div
                 className={cn(
-                  "flex min-w-0 max-w-[calc(100%-3.25rem)] flex-col items-start md:max-w-[80%]",
+                  "flex min-w-0 max-w-[calc(100%-3.25rem)] flex-col items-start md:max-w-[min(80%,48rem)]",
                   message.direction === "outgoing" && "items-end",
                 )}
               >
@@ -342,63 +350,41 @@ export function ConversationPane({
                           message.fromEmail ||
                           "")
                       }
-                      className={cn(
-                        "conversation-bubble relative min-w-0 max-w-full rounded px-3 py-2.5",
-                        message.direction === "outgoing" && "is-outgoing",
-                      )}
+                      className="min-w-0 max-w-full"
                     >
                       <ConversationMessageContent
                         key={message.id}
                         message={message}
                         refresh={refresh}
                         bodyDisplayMode={settings?.bodyDisplayMode ?? "text"}
-                        externalImagesBlocked={
-                          settings?.externalImagesBlocked ?? true
-                        }
                       >
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-1 text-xs"
-                          disabled={sending}
-                          onClick={() => {
-                            setReplyTarget(message);
-                            setNewTopic(false);
-                            setNotice("");
-                            replyInput.current?.focus();
-                          }}
-                        >
-                          <Reply className="size-3" />
-                          {text("回复", "Reply")}
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-1 text-xs"
-                          onClick={() => onOpenOriginal(message)}
-                        >
-                          <FileText className="size-3" />
-                          {text("显示原文", "Show original")}
-                        </Button>
-                        {onAskAi && message.messageId && <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-1 text-xs"
-                          onClick={() => onAskAi(message)}
-                        >
-                          <Sparkles className="size-3" />
-                          {text("问 AI", "Ask AI")}
-                        </Button>}
-                        <time
-                          dateTime={message.receivedAt}
-                          title={formatAbsoluteTime(message.receivedAt)}
-                          className="ml-auto shrink-0 whitespace-nowrap pl-2 text-[11px] leading-6 text-muted-foreground"
-                        >
-                          {formatRelativeTime(message.receivedAt, locale)}
-                        </time>
+                        {(copyBody) => <>
+                          <Tooltip>
+                            <TooltipTrigger asChild><Button type="button" variant="outline" size="icon-sm" disabled={sending} aria-label={text("回复", "Reply")} onClick={() => {
+                              setReplyTarget(message);
+                              setNewTopic(false);
+                              setNotice("");
+                              replyInput.current?.focus();
+                            }}><Reply className="size-4" aria-hidden="true" /></Button></TooltipTrigger>
+                            <TooltipContent side="bottom">{text("回复", "Reply")}</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild><Button type="button" variant="outline" size="icon-sm" disabled={!copyBody} aria-label={text("复制邮件内容", "Copy message content")} onClick={() => { if (copyBody) void copyTextToClipboard(copyBody, t) }}><Copy className="size-4" aria-hidden="true" /></Button></TooltipTrigger>
+                            <TooltipContent side="bottom">{text("复制邮件内容", "Copy message content")}</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild><Button type="button" variant="outline" size="icon-sm" aria-label={text("显示原文", "Show original")} onClick={() => onOpenOriginal(message)}><CircleAlert className="size-4" aria-hidden="true" /></Button></TooltipTrigger>
+                            <TooltipContent side="bottom">{text("显示原文", "Show original")}</TooltipContent>
+                          </Tooltip>
+                          {aiSettings && onAiChat && message.messageId && <ConversationAiMenu onSelect={(kind) => setAiInsight((current) => ({ messageId: message.messageId!, kind, token: (current?.token ?? 0) + 1 }))} />}
+                          <time
+                            dateTime={message.receivedAt}
+                            title={formatAbsoluteTime(message.receivedAt)}
+                            className="ml-auto shrink-0 whitespace-nowrap pl-2 text-[11px] leading-6 text-muted-foreground"
+                          >
+                            {formatRelativeTime(message.receivedAt, locale)}
+                          </time>
+                        </>}
                       </ConversationMessageContent>
                     </div>
                   </ContextMenuTrigger>
@@ -426,8 +412,24 @@ export function ConversationPane({
                 </ContextMenu>
               </div>
             </article>
+            <ConversationAiResult selection={aiInsight} message={message} settings={aiSettings} onChat={onAiChat} onOpenOriginal={() => onOpenOriginal(message)} onClose={() => setAiInsight(null)} />
           </div>
         ))}
+        </div>
+      </div>
+      {showScrollToBottom && <Button
+        type="button"
+        variant="outline"
+        size="icon"
+        className="absolute bottom-4 right-8 z-10 rounded-full bg-background shadow-md"
+        aria-label={text("滚动到底部", "Scroll to bottom")}
+        title={text("滚动到底部", "Scroll to bottom")}
+        onClick={() => {
+          const area = scrollArea.current;
+          if (area) area.scrollTop = area.scrollHeight;
+          setShowScrollToBottom(false);
+        }}
+      ><ChevronDown className="size-4" aria-hidden="true" /></Button>}
       </div>
       <ConversationComposer
         replyInput={replyInput}
@@ -442,11 +444,15 @@ export function ConversationPane({
         preparing={preparing}
         setNewTopic={setNewTopic}
         draft={draft}
+        senderEmail={senderEmail}
         subject={subject}
         send={send}
         sendError={sendError}
         notice={notice}
         onOpenOutbox={onOpenOutbox}
+        aiSettings={aiSettings}
+        onAiChat={onAiChat}
+        sourceMessage={replyMessage}
       />
       <ConversationDialogs
         participantsOpen={participantsOpen}

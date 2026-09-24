@@ -137,10 +137,12 @@ async fn send_once(
     };
     let message = build_message(account, input)?;
     let transport = build_transport(account, &secret)?;
+    let _network_request = state.network_activity.begin_for_account("send", account.account_id);
     transport
         .send(message)
         .await
         .map_err(|error| format!("SMTP 发信失败：{error}"))?;
+    drop(_network_request);
     let message_id = input
         .get("messageId")
         .and_then(Value::as_str)

@@ -1,14 +1,15 @@
-import type { ConversationListQuery, ConversationLocation, ConversationMessage, ConversationMessagesQuery, ConversationSummary } from '../conversations'
+import type { ConversationListQuery, ConversationLocation, ConversationMessage, ConversationMessagesQuery, ConversationSearchResult, ConversationSummary } from '../conversations'
 import type { AccountCreateInput, AccountCreatedEvent, AccountUpdateInput, ImapFolder, ImapFolderDiscoveryInput, MailAccount, SyncMode } from './accounts'
-import type { AccountMailboxStats, AttachmentDownloadResult, ComposeDraft, ForwardDraftInput, MailAttachmentInput, MailMessageBodyLoadResult, MailMessageDetail, MailMessageSummary, MailSendInput, MailSendResult, MessageBulkDeleteInput, MessageBulkDeleteResult, MessageBulkReadStateInput, MessageBulkReadStateResult, MessageDeleteInput, MessageDeleteResult, MessageListQuery, MessageMarkAllReadInput, MessageReadStateUpdate, MessageRestoreResult, OutboxListQuery, OutboxMessage, ReplyDraftInput } from './messages'
-import type { AccountSyncRunResult, MailboxChangedEvent, NewMailNotification, NotificationStatus, SyncAllRunResult, SyncProgressEvent, SyncStatus } from './sync'
-import type { AiChatInput, AiChatResult, AiSettings, AiSettingsInput, AppSettings, AppTheme, AppUpdateCheckResult, AppUpdateStatus, BackupImportProgress, BackupImportResult, BackupSyncDownloadResult, BackupSyncSettings, BackupSyncTestResult, BackupSyncTransferResult, SettingsUpdateInput, SystemInfo } from './settings'
+import type { AccountMailboxStats, ComposeDraft, ForwardDraftInput, MailAttachmentInput, MailMessageBodyLoadResult, MailMessageDetail, MailSendInput, MailSendResult, MessageReadStateUpdate, OutboxListQuery, OutboxMessage, ReplyDraftInput } from './messages'
+import type { AccountSyncRunResult, MailboxChangedEvent, NewMailNotification, SyncAllRunResult, SyncProgressEvent } from './sync'
+import type { AiChatInput, AiChatResult, AiSettings, AiSettingsInput, AppSettings, AppTheme, AppUpdateStatus, BackupImportProgress, BackupImportResult, BackupSyncDownloadResult, BackupSyncSettings, BackupSyncTestResult, BackupSyncTransferResult, SettingsUpdateInput, SystemInfo } from './settings'
 
 export type OneMailApi = {
   conversations: {
     list: (query?: ConversationListQuery) => Promise<ConversationSummary[]>
     messages: (query: ConversationMessagesQuery) => Promise<ConversationMessage[]>
     findMessage: (messageId: number) => Promise<ConversationLocation | null>
+    search: (keyword: string, limit: number, offset: number) => Promise<ConversationSearchResult[]>
   }
   accounts: {
     list: () => Promise<MailAccount[]>
@@ -19,25 +20,13 @@ export type OneMailApi = {
     closeAddWindow: () => Promise<boolean>
     update: (input: AccountUpdateInput) => Promise<MailAccount>
     reauthorize: (accountId: number) => Promise<MailAccount>
-    disable: (accountId: number) => Promise<MailAccount>
     remove: (accountId: number) => Promise<boolean>
   }
-  logos: {
-    get: (domain: string) => Promise<string | null>
-  }
   messages: {
-    list: (query?: MessageListQuery) => Promise<MailMessageSummary[]>
     stats: () => Promise<AccountMailboxStats[]>
     get: (messageId: number) => Promise<MailMessageDetail | null>
     loadBody: (messageId: number) => Promise<MailMessageBodyLoadResult>
     setReadState: (messageId: number, isRead: boolean) => Promise<MessageReadStateUpdate>
-    bulkSetReadState: (input: MessageBulkReadStateInput) => Promise<MessageBulkReadStateResult>
-    markAllRead: (input?: MessageMarkAllReadInput) => Promise<MessageBulkReadStateResult>
-    downloadAttachment: (attachmentId: number) => Promise<AttachmentDownloadResult>
-    delete: (input: MessageDeleteInput) => Promise<MessageDeleteResult>
-    bulkDelete: (input: MessageBulkDeleteInput) => Promise<MessageBulkDeleteResult>
-    hideLocal: (messageId: number) => Promise<MessageDeleteResult>
-    restore: (messageId: number) => Promise<MessageRestoreResult>
   }
   compose: {
     createReplyDraft: (input: ReplyDraftInput) => Promise<ComposeDraft>
@@ -54,12 +43,10 @@ export type OneMailApi = {
   sync: {
     startAll: (mode?: SyncMode) => Promise<SyncAllRunResult>
     startAccount: (accountId: number, mode?: SyncMode) => Promise<AccountSyncRunResult>
-    status: () => Promise<SyncStatus>
     onProgress: (callback: (event: SyncProgressEvent) => void) => () => void
     onMailboxChanged: (callback: (event: MailboxChangedEvent) => void) => () => void
   }
   notifications: {
-    status: () => Promise<NotificationStatus>
     onNewMail: (callback: (notification: NewMailNotification) => void) => () => void
   }
   settings: {
@@ -85,7 +72,6 @@ export type OneMailApi = {
     chat: (input: AiChatInput) => Promise<AiChatResult>
   }
   updates: {
-    check: () => Promise<AppUpdateCheckResult>
     status: () => Promise<AppUpdateStatus>
     install: () => Promise<boolean>
     onStatus: (callback: (status: AppUpdateStatus) => void) => () => void
@@ -93,9 +79,11 @@ export type OneMailApi = {
   system: {
     getTheme: () => Promise<AppTheme | null>
     info: () => Promise<SystemInfo>
+    memory: () => Promise<number>
+    databaseSize: () => Promise<number>
     setTitleBarTheme: (theme: AppTheme) => Promise<boolean>
-    revealDatabase: () => Promise<boolean>
     revealLogs: () => Promise<boolean>
+    openDatabaseDirectory: () => Promise<boolean>
     reloadClient: () => Promise<boolean>
     openDevtools: () => Promise<boolean>
     revealPath: (path: string) => Promise<boolean>

@@ -48,6 +48,7 @@ mailparse = "0.16"
 tokio = { version = "1", features = ["macros", "net", "io-util", "rt-multi-thread", "sync", "time"] }
 url = "2"
 zeroize = "1"
+sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"

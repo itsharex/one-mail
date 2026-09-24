@@ -22,7 +22,7 @@ pub fn accounts_list(state: State<'_, AppState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn accounts_discover_folders(input: Value) -> Result<Value, String> {
+pub async fn accounts_discover_folders(state: State<'_, AppState>, input: Value) -> Result<Value, String> {
     let object = require_object(&input)?;
     let email = required_string(object, "email", "邮箱地址不能为空。")?;
     let password = required_string(object, "password", "请输入邮箱授权码或密码。")?;
@@ -36,6 +36,7 @@ pub async fn accounts_discover_folders(input: Value) -> Result<Value, String> {
         imap_port,
         imap_security,
     };
+    let _network_request = state.network_activity.begin("folders");
     let folders = mail_transport::discover_folders(&config, &password).await?;
     serde_json::to_value(folders).map_err(|error| format!("序列化 IMAP 文件夹失败：{error}"))
 }
@@ -265,19 +266,6 @@ pub fn accounts_update(state: State<'_, AppState>, input: Value) -> Result<Value
             .map_err(database_error)?;
     }
     get_account(&connection, account_id)?.ok_or_else(|| format!("更新后无法读取账号：{account_id}"))
-}
-
-#[tauri::command]
-pub fn accounts_disable(state: State<'_, AppState>, account_id: i64) -> Result<Value, String> {
-    let connection = db::open(&state)?;
-    connection
-        .execute(
-            "UPDATE onemail_mail_accounts SET sync_enabled=0, status='disabled',
-              updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE account_id=?1",
-            [account_id],
-        )
-        .map_err(database_error)?;
-    get_account(&connection, account_id)?.ok_or_else(|| format!("账号不存在：{account_id}"))
 }
 
 #[tauri::command]

@@ -8,7 +8,6 @@ import type {
   AiSettings,
   AiSettingsInput,
   AppSettings,
-  AppUpdateCheckResult,
   AppUpdateStatus,
   BackupImportProgress,
   BackupSyncDownloadResult,
@@ -16,14 +15,10 @@ import type {
   BackupSyncTestResult,
   BackupSyncTransferResult,
   BackupImportResult,
-  AttachmentDownloadResult,
   MailAccount,
   MailAttachmentInput,
   ImapFolder,
   ImapFolderDiscoveryInput,
-  MessageBulkReadStateResult,
-  MessageReadStateUpdate,
-  MessageListQuery,
   MailboxChangedEvent,
   NewMailNotification,
   SettingsUpdateInput,
@@ -32,32 +27,34 @@ import type {
   SyncMode,
   SystemInfo
 } from '@renderer/shared/types'
-import type { ComposeDraftInput, ComposeDraft, SendMessageInput, SendMessageResult, DeleteMessageInput, DeleteMessageResult, BulkDeleteMessagesInput, BulkDeleteMessagesResult, HideMessageResult, RestoreMessageResult, OutboxMessage } from './api/types'
-import type { Account, Message } from '@renderer/components/mail/types'
+import type { ComposeDraftInput, ComposeDraft, SendMessageInput, SendMessageResult, OutboxMessage } from './api/types'
+import type { Account } from '@renderer/components/mail/types'
 import {
   toAccountList,
   getDefaultSelectedAccountId,
-  toMessage,
   createLocalDraft,
   toUiComposeDraft,
   toUiOutboxMessage,
   toSharedSendInput,
   requireRelatedMessageId,
-  mergeMessageBody,
   getStaticTranslation,
 } from './api/formatters'
 
-export async function loadInitialData(): Promise<{
+export async function loadInitialData(onStage?: (stage: 'database' | 'accounts') => void): Promise<{
   accounts: Account[]
   settings: AppSettings
   systemInfo: SystemInfo
   selectedAccountId: string
 }> {
-  const [mailAccounts, accountStats, settings, systemInfo] = await Promise.all([
-    window.api.accounts.list(),
-    window.api.messages.stats(),
+  onStage?.('database')
+  const [settings, systemInfo] = await Promise.all([
     window.api.settings.get(),
     window.api.system.info()
+  ])
+  onStage?.('accounts')
+  const [mailAccounts, accountStats] = await Promise.all([
+    window.api.accounts.list(),
+    window.api.messages.stats()
   ])
   const accounts = toAccountList(mailAccounts, accountStats)
   const selectedAccountId = getDefaultSelectedAccountId(accounts)
@@ -207,29 +204,12 @@ export function onBackupImportProgress(
   return window.api.settings.onBackupImportProgress(callback)
 }
 
-export async function revealDatabaseInFileManager(): Promise<boolean> {
-  return window.api.system.revealDatabase()
-}
-
 export async function revealPathInFileManager(path: string): Promise<boolean> {
   return window.api.system.revealPath(path)
 }
 
 export async function openExternalUrl(url: string): Promise<boolean> {
   return window.api.system.openExternal(url)
-}
-
-export async function checkForAppUpdates(): Promise<AppUpdateCheckResult> {
-  const checkUpdates = window.api?.updates?.check
-  if (typeof checkUpdates !== 'function') {
-    return {
-      status: 'unsupported',
-      currentVersion: '',
-      message: getStaticTranslation('settings.about.updateServiceUnavailable')
-    }
-  }
-
-  return checkUpdates()
 }
 
 export async function getAppUpdateStatus(): Promise<AppUpdateStatus> {
@@ -269,56 +249,6 @@ export async function loadAccounts(): Promise<Account[]> {
   ])
 
   return toAccountList(accounts, accountStats)
-}
-
-export async function loadMessages(query: MessageListQuery): Promise<Message[]> {
-  const messages = await window.api.messages.list(query)
-  return messages.map(toMessage)
-}
-
-export async function loadMessageDetail(messageId: number): Promise<Message | null> {
-  const message = await window.api.messages.get(messageId)
-  return message ? toMessage(message) : null
-}
-
-export async function loadMessageBody(message: Message): Promise<Message> {
-  const result = await window.api.messages.loadBody(message.messageId)
-  if (!result.body) {
-    return {
-      ...message,
-      bodyStatus: result.error ? 'error' : message.bodyStatus,
-      bodyError: result.error
-    }
-  }
-
-  const detail = await window.api.messages.get(message.messageId)
-  if (detail) return toMessage(detail)
-
-  return mergeMessageBody(message, result.body)
-}
-
-export async function setMessageReadState(
-  messageId: number,
-  isRead: boolean
-): Promise<MessageReadStateUpdate> {
-  return window.api.messages.setReadState(messageId, isRead)
-}
-
-export async function bulkSetMessageReadState(
-  messageIds: number[],
-  isRead: boolean
-): Promise<MessageBulkReadStateResult> {
-  return window.api.messages.bulkSetReadState({ messageIds, isRead })
-}
-
-export async function markAllMessagesRead(
-  query: MessageListQuery
-): Promise<MessageBulkReadStateResult> {
-  return window.api.messages.markAllRead({ query })
-}
-
-export async function downloadAttachment(attachmentId: number): Promise<AttachmentDownloadResult> {
-  return window.api.messages.downloadAttachment(attachmentId)
 }
 
 export async function createComposeDraft(input: ComposeDraftInput): Promise<ComposeDraft> {
@@ -387,46 +317,5 @@ export async function deleteDraftMessage(outboxId: number): Promise<boolean> {
   return window.api.compose.deleteDraft(outboxId)
 }
 
-export async function deleteMessage(input: DeleteMessageInput): Promise<DeleteMessageResult> {
-  const result = await window.api.messages.delete({
-    messageId: input.messageId,
-    mode: 'permanent'
-  })
-  return {
-    messageId: result.messageId,
-    deleted: result.deleted,
-    permanent: result.mode === 'permanent',
-    hidden: result.mode === 'local_hide',
-    error: result.error
-  }
-}
-
-export async function bulkDeleteMessages(
-  input: BulkDeleteMessagesInput
-): Promise<BulkDeleteMessagesResult> {
-  return window.api.messages.bulkDelete({
-    messageIds: input.messageIds,
-    mode: 'permanent'
-  })
-}
-
-export async function hideMessage(messageId: number): Promise<HideMessageResult> {
-  const result = await window.api.messages.hideLocal(messageId)
-  return {
-    messageId: result.messageId,
-    hidden: result.deleted || result.localOnly
-  }
-}
-
-export async function restoreMessage(messageId: number): Promise<RestoreMessageResult> {
-  const result = await window.api.messages.restore(messageId)
-  return {
-    messageId: result.messageId,
-    restored: result.restored
-  }
-}
-
-
-export { MESSAGE_LIST_PAGE_SIZE } from './api/types'
-export type { ComposeKind, ComposeDraftInput, ComposeDraft, SendMessageInput, SendMessageResult, DeleteMessageInput, DeleteMessageResult, BulkDeleteMessagesInput, BulkDeleteMessagesResult, HideMessageResult, RestoreMessageResult, OutboxMessage } from './api/types'
-export { getPlatformName, toUiComposeDraft, toSharedSendInput, toMessageQuery } from './api/formatters'
+export type { ComposeKind, ComposeDraftInput, ComposeDraft, SendMessageInput, SendMessageResult, OutboxMessage } from './api/types'
+export { getPlatformName, toUiComposeDraft, toSharedSendInput } from './api/formatters'

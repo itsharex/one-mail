@@ -1,6 +1,6 @@
 import { compactMailBodyText } from '@renderer/shared/mail-text'
 
-const paragraphTags = new Set(['P', 'DIV', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'TR', 'UL', 'OL', 'BLOCKQUOTE', 'PRE'])
+const paragraphTags = new Set(['P', 'DIV', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL', 'BLOCKQUOTE', 'PRE'])
 
 export type ConversationTextLink = { text: string; href: string }
 
@@ -37,6 +37,7 @@ export function conversationHtmlToText(html: string, links?: ConversationTextLin
     }
     if (node.tagName === 'LI') return `\n• ${text.trim()}`
     if (node.tagName === 'TD' || node.tagName === 'TH') return `${text.trim()} `
+    if (node.tagName === 'TR') return `${text.trim()}\n`
     if (node.tagName === 'BLOCKQUOTE') return `\n\n${text.trim().split('\n').map((line) => `> ${line}`).join('\n')}\n\n`
     if (node.tagName === 'PRE') return `\n\n${(node.textContent || '').replace(/[\uE000\uE001]/g, '')}\n\n`
     return paragraphTags.has(node.tagName) ? `\n\n${text.trim()}\n\n` : text

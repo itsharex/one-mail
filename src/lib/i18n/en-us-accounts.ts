@@ -22,11 +22,12 @@ export const enUSAccounts = {
   'account.provider.mailru': 'Mail.ru',
   'account.provider.custom': 'Custom IMAP/SMTP',
   'account.form.email': 'Email address',
+  'account.form.authMethod': 'Sign-in method',
   'account.form.googleLogin': 'Sign in with Google',
   'account.form.gmailAppPassword': 'Use an app password',
   'account.form.advancedOptions': 'Advanced options',
   'account.form.googleLoginDescription':
-    'After clicking sign-in, OneMail opens the system browser for Google authorization. After authorization, OneMail reads the mailbox address from the token.',
+    'The system browser opens for Google authorization. Your email address is read automatically.',
   'account.form.password': 'Password',
   'account.form.appPassword': 'App password',
   'account.form.appSpecificPassword': 'App-specific password',
@@ -92,7 +93,7 @@ export const enUSAccounts = {
   'account.add.microsoftLogin': 'Sign in with Microsoft',
   'account.add.saveAccount': 'Save account',
   'account.add.guideLink': 'View setup guide',
-  'account.add.guide.gmail': 'Gmail uses Google OAuth by default. For manual setup, choose an app password in advanced options.',
+  'account.add.guide.gmail': 'Gmail uses Google authorization by default. You can also choose an app password.',
   'account.add.guide.netease163':
     'Before adding {label}, enable IMAP/SMTP and prepare a client authorization code.',
   'account.add.guide.qq':

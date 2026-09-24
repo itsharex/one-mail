@@ -4,12 +4,6 @@ use tauri::{AppHandle, Emitter, State};
 use crate::{client_log, commands::system, mail::sync as mail_sync, state::{wait_for_batch, AppState, BatchStart}};
 
 #[tauri::command]
-pub fn sync_status(state: State<'_, AppState>) -> Result<Value, String> {
-    let account_ids = state.sync_tracker.account_ids()?;
-    Ok(json!({ "running": !account_ids.is_empty(), "accountIds": account_ids }))
-}
-
-#[tauri::command]
 pub async fn sync_start_all(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -34,6 +28,7 @@ pub async fn sync_start_all(
                         "error": result.get("error").and_then(Value::as_str)
                     }));
                 }, Some(&|account_id, stage, folder| {
+                    let _ = client_log::write(&app, &format!("INFO Sync step account {account_id} stage={stage}"));
                     let _ = app.emit("sync/progress", json!({ "accountId": account_id, "stage": stage, "folder": folder }));
                 })).await;
                 let _ = client_log::write(&app, "INFO Manual sync finished");
@@ -53,10 +48,15 @@ pub async fn sync_start_account(
 ) -> Result<Value, String> {
     let _ = client_log::write(&app, &format!("INFO Sync account {account_id} started"));
     let result = mail_sync::sync_account(&state, account_id, mode.as_deref(), Some(&|account_id, stage, folder| {
+        let _ = client_log::write(&app, &format!("INFO Sync step account {account_id} stage={stage}"));
         let _ = app.emit("sync/progress", json!({ "accountId": account_id, "stage": stage, "folder": folder }));
-    })).await?;
+    })).await.map_err(|error| {
+        let _ = client_log::write(&app, &format!("WARN Sync account {account_id} failed"));
+        error
+    })?;
     let status = if result.get("ok").and_then(Value::as_bool) == Some(true) { "complete" } else { "failed" };
-    let _ = client_log::write(&app, &format!("INFO Sync account {account_id} {status}"));
+    let level = if status == "failed" { "WARN" } else { "INFO" };
+    let _ = client_log::write(&app, &format!("{level} Sync account {account_id} {status}"));
     publish_sync_result(&app, &result, mode.as_deref(), "manual");
     if result.get("ok").and_then(Value::as_bool) == Some(false)
         && result.get("skipped").and_then(Value::as_bool) != Some(true)
@@ -64,11 +64,6 @@ pub async fn sync_start_account(
         return Err(result.get("error").and_then(Value::as_str).unwrap_or("账号同步未完成。").to_string());
     }
     Ok(result)
-}
-
-#[tauri::command]
-pub fn notifications_status() -> Value {
-    json!({ "desktopSupported": true })
 }
 
 pub(crate) fn publish_sync_result(app: &AppHandle, result: &Value, mode: Option<&str>, reason: &str) {

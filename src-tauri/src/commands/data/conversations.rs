@@ -5,7 +5,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use tauri::State;
 
-use crate::{db, state::AppState};
+use crate::{db, mail::body::html_to_text, state::AppState};
 use super::utils::{database_error, optional_i64, optional_string, require_object};
 
 #[tauri::command]
@@ -14,16 +14,23 @@ pub async fn conversations_list(state: State<'_, AppState>, query: Option<Value>
     let object = query.as_ref().and_then(Value::as_object);
     let account_id = object.and_then(|o| optional_i64(o, "accountId"));
     let keyword = object.and_then(|o| optional_string(o, "keyword")).unwrap_or_default().to_lowercase();
+    let received_from_ms = object.and_then(|o| optional_i64(o, "receivedFromMs"));
+    let received_before_ms = object.and_then(|o| optional_i64(o, "receivedBeforeMs"));
     let (limit, offset) = pagination(object);
     tauri::async_runtime::spawn_blocking(move || {
         let connection = db::open_path(&path)?;
-        conversation_page(&connection, account_id, &keyword, limit, offset)
+        conversation_page(&connection, account_id, &keyword, received_from_ms, received_before_ms, limit, offset)
     }).await.map_err(|error| format!("加载对话失败：{error}"))?
 }
 
-fn conversation_page(connection: &Connection, account_id: Option<i64>, keyword: &str, limit: usize, offset: usize) -> Result<Value, String> {
+fn conversation_page(connection: &Connection, account_id: Option<i64>, keyword: &str, received_from_ms: Option<i64>, received_before_ms: Option<i64>, limit: usize, offset: usize) -> Result<Value, String> {
     let mut summaries = Vec::new();
     for (conversation_id, (participants, messages)) in collect_conversations(connection, account_id)? {
+        if received_from_ms.is_some() || received_before_ms.is_some() {
+            let Some(timestamp) = messages.first().and_then(message_timestamp) else { continue; };
+            if received_from_ms.is_some_and(|from| timestamp < from)
+                || received_before_ms.is_some_and(|before| timestamp >= before) { continue; }
+        }
         let display_name = conversation_display_name(&participants);
         if !keyword.is_empty() && !display_name.to_lowercase().contains(keyword)
             && !participants.iter().any(|p| text(p, "email").contains(keyword))
@@ -48,6 +55,99 @@ pub async fn conversations_find_message(state: State<'_, AppState>, message_id: 
         let connection = db::open_path(&path)?;
         find_message_location(&connection, message_id)
     }).await.map_err(|error| format!("定位邮件失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn conversations_search(state: State<'_, AppState>, keyword: String, limit: i64, offset: i64) -> Result<Value, String> {
+    let keyword = keyword.trim().to_lowercase();
+    if keyword.is_empty() { return Ok(json!([])); }
+    let path = state.database_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let connection = db::open_path(&path)?;
+        search_messages(&connection, &keyword, limit.clamp(1, 200) as usize, offset.max(0) as usize)
+    }).await.map_err(|error| format!("搜索邮件失败：{error}"))?
+}
+
+fn search_pattern(keyword: &str) -> String {
+    format!("%{}%", keyword.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))
+}
+
+fn matching_bodies(connection: &Connection, table: &str, id_column: &str, keyword: &str) -> Result<BTreeMap<i64, String>, String> {
+    let pattern = search_pattern(keyword);
+    let sql = format!("SELECT {id_column}, body_text FROM {table} WHERE body_text LIKE ?1 ESCAPE '\\'");
+    let mut statement = connection.prepare(&sql).map_err(database_error)?;
+    let rows = statement.query_map([pattern], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+        .map_err(database_error)?;
+    rows.collect::<Result<BTreeMap<_, _>, _>>().map_err(database_error)
+}
+
+fn matching_html_bodies(connection: &Connection, keyword: &str) -> Result<BTreeMap<i64, String>, String> {
+    let mut statement = connection.prepare(
+        "SELECT message_id, body_html_sanitized FROM onemail_message_bodies
+         WHERE body_text IS NULL AND body_html_sanitized LIKE ?1 ESCAPE '\\'"
+    ).map_err(database_error)?;
+    let rows = statement.query_map([search_pattern(keyword)], |row|
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))).map_err(database_error)?;
+    let mut matches = BTreeMap::new();
+    for row in rows {
+        let (id, html) = row.map_err(database_error)?;
+        let plain = html_to_text(&html);
+        if plain.to_lowercase().contains(keyword) { matches.insert(id, plain); }
+    }
+    Ok(matches)
+}
+
+fn excerpt_around(value: &str, keyword: &str) -> String {
+    let lower = value.to_lowercase();
+    let position = lower.find(keyword).unwrap_or(0);
+    let chars = value.chars().collect::<Vec<_>>();
+    let start = value.get(..position).unwrap_or_default().chars().count().saturating_sub(48);
+    let end = (start + 160).min(chars.len());
+    format!("{}{}{}", if start > 0 { "…" } else { "" }, chars[start..end].iter().collect::<String>(), if end < chars.len() { "…" } else { "" })
+}
+
+fn search_messages(connection: &Connection, keyword: &str, limit: usize, offset: usize) -> Result<Value, String> {
+    let mut bodies = matching_bodies(connection, "onemail_message_bodies", "message_id", keyword)?;
+    bodies.extend(matching_html_bodies(connection, keyword)?);
+    let outbox_bodies = matching_bodies(connection, "onemail_outbox_messages", "outbox_id", keyword)?;
+    let mut matches = Vec::new();
+    for (conversation_id, (participants, messages)) in collect_conversations(connection, None)? {
+        let display_name = conversation_display_name(&participants);
+        let contact_match = display_name.to_lowercase().contains(keyword) || participants.iter().any(|person|
+            text(person, "email").to_lowercase().contains(keyword));
+        let summary = conversation_summary(conversation_id, participants, messages.clone(), display_name);
+        for (message_offset, message) in messages.iter().enumerate() {
+            let account_offset = messages[..message_offset].iter().filter(|previous|
+                previous["accountId"] == message["accountId"]).count();
+            let body = message["messageId"].as_i64().and_then(|id| bodies.get(&id))
+                .or_else(|| message["outboxId"].as_i64().and_then(|id| outbox_bodies.get(&id)));
+            let fields = ["subject", "snippet", "fromName", "fromEmail"];
+            let metadata_match = fields.iter().any(|field| text(&message, field).to_lowercase().contains(keyword))
+                || ["to", "cc"].iter().any(|field| message[field].as_array().into_iter().flatten().any(|person|
+                    text(person, "name").to_lowercase().contains(keyword) || text(person, "email").to_lowercase().contains(keyword)));
+            if !contact_match && !metadata_match && body.is_none() { continue; }
+            let excerpt = [text(&message, "subject"), text(&message, "snippet")].into_iter()
+                .find(|value| value.to_lowercase().contains(keyword))
+                .map(|value| excerpt_around(value, keyword))
+                .or_else(|| body.map(|value| excerpt_around(value, keyword)))
+                .or_else(|| [text(&message, "fromName"), text(&message, "fromEmail")].into_iter()
+                    .find(|value| value.to_lowercase().contains(keyword)).map(str::to_owned))
+                .or_else(|| ["to", "cc"].iter().flat_map(|field|
+                    message[field].as_array().into_iter().flatten()).flat_map(|person|
+                    [text(person, "name"), text(person, "email")]).find(|value|
+                    value.to_lowercase().contains(keyword)).map(str::to_owned))
+                .or_else(|| summary["participants"].as_array().into_iter().flatten().flat_map(|person|
+                    [text(person, "name"), text(person, "email")]).find(|value|
+                    value.to_lowercase().contains(keyword)).map(str::to_owned))
+                .unwrap_or_else(|| text(&message, "snippet").to_owned());
+            matches.push(json!({"conversation":summary,"message":message,"offset":account_offset,"excerpt":excerpt}));
+        }
+    }
+    matches.sort_by_cached_key(|result| (
+        Reverse(message_timestamp(&result["message"])),
+        text(&result["message"], "id").to_owned(),
+    ));
+    Ok(Value::Array(matches.into_iter().skip(offset).take(limit).collect()))
 }
 
 fn find_message_location(connection: &Connection, message_id: i64) -> Result<Option<Value>, String> {
@@ -323,9 +423,9 @@ mod tests {
             [json!([{"email":"bob@example.test"}]).to_string()],
         ).unwrap();
 
-        let first = conversation_page(&connection, None, "", 2, 0).unwrap();
-        let second = conversation_page(&connection, None, "", 2, 2).unwrap();
-        let last = conversation_page(&connection, None, "", 2, 4).unwrap();
+        let first = conversation_page(&connection, None, "", None, None, 2, 0).unwrap();
+        let second = conversation_page(&connection, None, "", None, None, 2, 2).unwrap();
+        let last = conversation_page(&connection, None, "", None, None, 2, 4).unwrap();
         assert_eq!(first[0]["conversationId"], "person:bob@example.test");
         assert_eq!(first[0]["lastMessage"]["direction"], "outgoing");
         assert_eq!(first[1]["conversationId"], "person:charlie@example.test");
@@ -333,6 +433,14 @@ mod tests {
         assert_eq!(second[0]["lastMessage"]["messageId"], 2);
         assert_eq!(second[1]["conversationId"], "person:eve@example.test");
         assert_eq!(last[0]["conversationId"], "person:unknown@example.test");
+        let from = chrono::DateTime::parse_from_rfc3339("2026-09-14T08:00:00Z").unwrap().timestamp_millis();
+        let before = chrono::DateTime::parse_from_rfc3339("2026-09-14T10:00:00Z").unwrap().timestamp_millis();
+        let filtered_first = conversation_page(&connection, None, "", Some(from), Some(before), 2, 0).unwrap();
+        let filtered_last = conversation_page(&connection, None, "", Some(from), Some(before), 2, 2).unwrap();
+        assert_eq!(filtered_first[0]["conversationId"], "person:charlie@example.test");
+        assert_eq!(filtered_first[1]["conversationId"], "person:alice@example.test");
+        assert_eq!(filtered_last[0]["conversationId"], "person:eve@example.test");
+        assert_eq!(filtered_last.as_array().unwrap().len(), 1);
         let conversations = collect_conversations(&connection, Some(1)).unwrap();
         let messages = &conversations["person:alice@example.test"].1;
         assert_eq!(messages[0]["messageId"], 2);
@@ -349,5 +457,33 @@ mod tests {
         assert!(timestamp("2026-09-14T09:00:00Z") > timestamp("2026-09-14T16:00:00+08:00"));
         assert!(timestamp("2026-09-14T08:00:00.500Z") > timestamp("2026-09-14T08:00:00Z"));
         assert_eq!(timestamp("invalid date"), None);
+    }
+
+    #[test]
+    fn global_search_finds_body_across_accounts_and_uses_account_timeline_offset() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(include_str!("../../db/schema.sql")).unwrap();
+        connection.execute_batch(
+            "INSERT INTO onemail_provider_presets (provider_key,display_name,auth_type) VALUES ('test','Test','manual');
+             INSERT INTO onemail_mail_accounts
+               (account_id,provider_key,email,normalized_email,account_label,auth_type,imap_host,imap_port,imap_security)
+             VALUES (1,'test','one@example.test','one@example.test','One','manual','localhost',993,'ssl_tls'),
+                    (2,'test','two@example.test','two@example.test','Two','manual','localhost',993,'ssl_tls');
+             INSERT INTO onemail_mail_folders (folder_id,account_id,path,name,role)
+             VALUES (1,1,'INBOX','Inbox','inbox'),(2,2,'INBOX','Inbox','inbox');
+             INSERT INTO onemail_mail_messages (message_id,account_id,folder_id,uid,from_email,received_at)
+             VALUES (1,1,1,1,'alice@example.test','2026-09-14T12:00:00Z'),
+                    (2,2,2,2,'alice@example.test','2026-09-14T11:00:00Z'),
+                    (3,2,2,3,'alice@example.test','2026-09-14T10:00:00Z');
+             INSERT INTO onemail_message_bodies (message_id,body_text,body_html_sanitized)
+             VALUES (1,'a needle here',NULL),(2,'no match',NULL),
+                    (3,NULL,'<p>the other <strong>needle</strong> here</p>');"
+        ).unwrap();
+        let first = search_messages(&connection, "needle", 1, 0).unwrap();
+        let second = search_messages(&connection, "needle", 1, 1).unwrap();
+        assert_eq!(first[0]["message"]["messageId"], 1);
+        assert_eq!(second[0]["message"]["messageId"], 3);
+        assert_eq!(second[0]["offset"], 1);
+        assert!(second[0]["excerpt"].as_str().unwrap().contains("needle"));
     }
 }

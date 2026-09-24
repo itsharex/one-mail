@@ -73,6 +73,17 @@ export function AccountList({
     accounts.filter((account) => account.id !== 'all'),
     t
   )
+  React.useEffect(() => {
+    const selected = accounts.find((account) => account.id === selectedAccountId)
+    if (!selected?.accountId) return
+    const key = normalizeProviderKey(selected.providerKey)
+    setCollapsedGroups((current) => {
+      if (!current.has(key)) return current
+      const next = new Set(current)
+      next.delete(key)
+      return next
+    })
+  }, [accounts, selectedAccountId])
 
   function toggleGroup(groupKey: string): void {
     setCollapsedGroups((current) => {

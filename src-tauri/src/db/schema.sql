@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS onemail_mail_messages (
   snippet TEXT,
   size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
   is_read INTEGER NOT NULL DEFAULT 0 CHECK (is_read IN (0, 1)),
+  read_state_override INTEGER CHECK (read_state_override IN (0, 1)),
   is_starred INTEGER NOT NULL DEFAULT 0 CHECK (is_starred IN (0, 1)),
   is_answered INTEGER NOT NULL DEFAULT 0 CHECK (is_answered IN (0, 1)),
   is_draft INTEGER NOT NULL DEFAULT 0 CHECK (is_draft IN (0, 1)),

@@ -102,11 +102,13 @@ pub struct AiChatInput {
 pub struct AiChatResult {
     pub message: AiChatMessage,
     pub model: String,
+    pub context_truncated: bool,
 }
 
 struct ValidatedAiSettings {
     base_url: String,
     endpoint: Url,
+    fallback_endpoint: Option<Url>,
     model: String,
     api_key_required: bool,
 }
@@ -195,15 +197,17 @@ pub async fn settings_verify_and_save(
             content: "OK".to_string(),
         },
     ];
-    send_completion(
+    let _network_request = state.network_activity.begin("ai");
+    let verification_result = send_completion(
         &client,
         &validated,
         api_key,
         &verification_messages,
         VERIFICATION_TOKENS,
     )
-    .await
-    .map_err(|error| error.message)?;
+    .await;
+    drop(_network_request);
+    verification_result.map_err(|error| error.message)?;
 
     let credential_changed = if let Some(api_key) = &supplied_key {
         write_credential(&validated.base_url, api_key).await?;
@@ -266,9 +270,10 @@ pub async fn chat(state: &AppState, input: AiChatInput) -> Result<AiChatResult, 
     } else {
         None
     };
-    let messages = build_chat_messages(state, input).await?;
+    let (messages, context_truncated) = build_chat_messages(state, input).await?;
     let client = build_client()?;
-    let completion = match send_completion(
+    let _network_request = state.network_activity.begin("ai");
+    let completion_result = send_completion(
         &client,
         &validated,
         credential
@@ -277,8 +282,9 @@ pub async fn chat(state: &AppState, input: AiChatInput) -> Result<AiChatResult, 
         &messages,
         MAX_COMPLETION_TOKENS,
     )
-    .await
-    {
+    .await;
+    drop(_network_request);
+    let completion = match completion_result {
         Ok(completion) => completion,
         Err(error) => {
             if error.invalidates_verification {
@@ -294,24 +300,30 @@ pub async fn chat(state: &AppState, input: AiChatInput) -> Result<AiChatResult, 
             content: completion.content,
         },
         model: validated.model,
+        context_truncated,
     })
 }
 
 async fn build_chat_messages(
     state: &AppState,
     input: AiChatInput,
-) -> Result<Vec<ProviderMessage>, String> {
+) -> Result<(Vec<ProviderMessage>, bool), String> {
     validate_history(&input.messages)?;
     let mut messages = vec![ProviderMessage {
         role: "system",
         content: SYSTEM_PROMPT.to_string(),
     }];
 
+    let mut context_truncated = false;
     if let Some(message_id) = input.message_id {
         if message_id <= 0 {
             return Err("邮件 ID 无效。".to_string());
         }
         let context = load_mail_context(state, message_id).await?;
+        if context.body.trim().is_empty() {
+            return Err("这封邮件没有可供 AI 阅读的正文。".to_string());
+        }
+        context_truncated = context.truncated;
         messages.push(ProviderMessage {
             role: "user",
             content: build_untrusted_mail_message(&context)?,
@@ -322,7 +334,7 @@ async fn build_chat_messages(
         role: message.role.as_str(),
         content: message.content,
     }));
-    Ok(messages)
+    Ok((messages, context_truncated))
 }
 
 fn build_untrusted_mail_message(context: &MailContextPayload) -> Result<String, String> {
@@ -398,10 +410,20 @@ fn validate_settings(base_url: &str, model: &str) -> Result<ValidatedAiSettings,
     let endpoint = parsed
         .join("chat/completions")
         .map_err(|_| "无法构造 AI Chat Completions 地址。".to_string())?;
+    let fallback_endpoint = if path.is_empty() && !api_key_required {
+        Some(
+            parsed
+                .join("v1/chat/completions")
+                .map_err(|_| "无法构造 AI Chat Completions 地址。".to_string())?,
+        )
+    } else {
+        None
+    };
     let base_url = parsed.as_str().trim_end_matches('/').to_string();
     Ok(ValidatedAiSettings {
         base_url,
         endpoint,
+        fallback_endpoint,
         model: model.to_string(),
         api_key_required,
     })

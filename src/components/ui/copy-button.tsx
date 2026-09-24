@@ -20,15 +20,10 @@ export function CopyButton({ value, resetDelay = 2000, ...props }: CopyButtonPro
   }, [])
 
   async function copy(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(value)
-      setCopied(true)
-      toast.success(t('common.copied'))
-      if (resetTimer.current) clearTimeout(resetTimer.current)
-      resetTimer.current = setTimeout(() => setCopied(false), resetDelay)
-    } catch {
-      toast.error(t('common.copyFailed'))
-    }
+    if (!await copyTextToClipboard(value, t)) return
+    setCopied(true)
+    if (resetTimer.current) clearTimeout(resetTimer.current)
+    resetTimer.current = setTimeout(() => setCopied(false), resetDelay)
   }
 
   return (
@@ -41,4 +36,15 @@ export function CopyButton({ value, resetDelay = 2000, ...props }: CopyButtonPro
       {copied ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
     </Button>
   )
+}
+
+export async function copyTextToClipboard(value: string, t: ReturnType<typeof useI18n>['t']): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(value)
+    toast.success(t('common.copied'))
+    return true
+  } catch {
+    toast.error(t('common.copyFailed'))
+    return false
+  }
 }

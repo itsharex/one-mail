@@ -43,6 +43,8 @@ export type ConversationSummary = {
 export type ConversationListQuery = {
   accountId?: number
   keyword?: string
+  receivedFromMs?: number
+  receivedBeforeMs?: number
   limit?: number
   offset?: number
 }
@@ -57,4 +59,9 @@ export type ConversationMessagesQuery = {
 export type ConversationLocation = {
   conversation: ConversationSummary
   offset: number
+}
+
+export type ConversationSearchResult = ConversationLocation & {
+  message: ConversationMessage
+  excerpt: string
 }

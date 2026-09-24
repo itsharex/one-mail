@@ -2,6 +2,8 @@ import { useState } from "react";
 import { DefaultAvatar } from "@renderer/components/default-avatar";
 import { ConversationAddress } from "@renderer/shared/conversations";
 import { cn } from "@renderer/lib/utils";
+import googleVoiceIcon from "@renderer/assets/provider-icons/google-voice.svg";
+import wiseIcon from "simple-icons/icons/wise.svg";
 
 const logoResults = new Map<string, 'loaded' | 'failed'>();
 
@@ -37,7 +39,7 @@ export function ConversationAvatar({
       )}
     >
       {imageUrl ? (
-        <LogoAvatar src={imageUrl} minSize={iconUrl || logo?.vector ? 0 : 96} enlarge={logo?.enlarge} fallback={fallback} />
+        <LogoAvatar src={imageUrl} minSize={iconUrl || logo?.vector ? 0 : 96} enlarge={logo?.enlarge} shrink={!iconUrl && logo?.shrink} fallback={fallback} />
       ) : (
         fallback
       )}
@@ -45,9 +47,16 @@ export function ConversationAvatar({
   );
 }
 
-function getLogoForEmail(email: string): { url: string; vector?: boolean; enlarge?: boolean } | null {
+function getLogoForEmail(email: string): { url: string; vector?: boolean; enlarge?: boolean; shrink?: boolean } | null {
+  if (email.trim().toLowerCase() === "voice-noreply@google.com") {
+    return { url: googleVoiceIcon, vector: true };
+  }
   const domain = /^[^@\s]+@([a-z0-9.-]+\.[a-z]{2,})$/i.exec(email.trim())?.[1]?.toLowerCase();
   if (!domain) return null;
+
+  if (domain === "wise.com" || domain.endsWith(".wise.com")) {
+    return { url: wiseIcon, vector: true, shrink: true };
+  }
 
   if (["163.com", "126.com", "yeah.net"].some((suffix) => domain === suffix || domain.endsWith(`.${suffix}`))) {
     return { url: "https://logos.hunter.io/netease.com", enlarge: true };
@@ -58,10 +67,10 @@ function getLogoForEmail(email: string): { url: string; vector?: boolean; enlarg
   if (domain === "paypal.com" || domain.endsWith(".paypal.com")) {
     return { url: "https://api.iconify.design/logos/paypal.svg", vector: true };
   }
-  return { url: `https://logos.hunter.io/${domain}` };
+  return { url: `https://logos.hunter.io/${domain}`, shrink: domain === "apple.com" || domain.endsWith(".apple.com") };
 }
 
-function LogoAvatar({ src, minSize, enlarge, fallback }: { src: string; minSize: number; enlarge?: boolean; fallback: React.ReactNode }) {
+function LogoAvatar({ src, minSize, enlarge, shrink, fallback }: { src: string; minSize: number; enlarge?: boolean; shrink?: boolean; fallback: React.ReactNode }) {
   const cacheKey = `${src}:${minSize}`;
   const [result, setResult] = useState<{ key: string; status: 'loaded' | 'failed' } | null>(null);
   const status = result?.key === cacheKey ? result.status : logoResults.get(cacheKey);
@@ -75,7 +84,7 @@ function LogoAvatar({ src, minSize, enlarge, fallback }: { src: string; minSize:
         src={src}
         alt=""
         referrerPolicy="no-referrer"
-        className={cn("absolute inset-0 size-full rounded object-contain", enlarge && "scale-[1.2]", !showLogo && "invisible")}
+        className={cn("absolute inset-0 size-full rounded object-contain", enlarge && "scale-[1.2]", shrink && "scale-[0.8]", !showLogo && "invisible")}
         onLoad={(event) => {
           const { naturalWidth, naturalHeight } = event.currentTarget;
           const next = naturalWidth >= minSize && naturalHeight >= minSize ? 'loaded' : 'failed';

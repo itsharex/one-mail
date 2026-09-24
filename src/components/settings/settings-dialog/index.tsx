@@ -1,5 +1,4 @@
 import { zodResolver } from '@hookform/resolvers/zod'
-import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { BadgeInfo, Bot, DatabaseBackup, RefreshCcw } from 'lucide-react'
 import * as React from 'react'
@@ -109,7 +108,6 @@ export function SettingsDialog({
   const autoSaveTimerRef = React.useRef<number | null>(null)
   const queuedValuesRef = React.useRef<SettingsFormValues | null>(null)
   const savingRef = React.useRef(false)
-  const closingRef = React.useRef(false)
   const wasOpenRef = React.useRef(false)
   const backupImportSourceRef = React.useRef<BackupImportDialogSource>('sql')
   const form = useForm<SettingsFormValues>({
@@ -212,16 +210,16 @@ export function SettingsDialog({
     if (!standalone) return
     let active = true
     let stop: (() => void) | undefined
-    void getCurrentWindow().onCloseRequested((event) => {
-      if (closingRef.current) return
-      event.preventDefault()
-      if (backupPending) return
-      void flushPendingSettings().then((saved) => {
-        if (saved) {
-          closingRef.current = true
-          return invoke('settings_close_window')
-        }
-      }).catch((reason) => { closingRef.current = false; setError(String(reason)) })
+    void getCurrentWindow().onCloseRequested(async (event) => {
+      if (backupPending) {
+        event.preventDefault()
+        return
+      }
+      try {
+        await flushPendingSettings()
+      } catch (reason) {
+        console.warn('Failed to save settings before closing.', reason)
+      }
     }).then((unlisten) => { if (active) stop = unlisten; else unlisten() })
     return () => { active = false; stop?.() }
   }, [backupPending, flushPendingSettings, standalone])

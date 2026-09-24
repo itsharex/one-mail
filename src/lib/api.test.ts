@@ -12,7 +12,9 @@ describe('conversation workspace startup', () => {
       system: { info: async () => ({ platform: 'darwin' }) }
     } })
     try {
-      const result = await loadInitialData()
+      const stages: string[] = []
+      const result = await loadInitialData((stage) => stages.push(stage))
+      expect(stages).toEqual(['database', 'accounts'])
       expect(result.selectedAccountId).toBe('1')
       expect(result.accounts[0]).toMatchObject({ accountId: 1, unread: 2, messageCount: 12 })
       expect(listMessages).not.toHaveBeenCalled()

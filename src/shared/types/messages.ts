@@ -1,18 +1,5 @@
 
 
-export type MessageFilterTag = 'unread' | 'starred' | 'today' | 'yesterday' | 'last7'
-
-export type MessageListQuery = {
-  accountId?: number
-  folderId?: number
-  filters?: MessageFilterTag[]
-  keyword?: string
-  search?: string
-  cursor?: string
-  limit?: number
-  offset?: number
-}
-
 export type MailMessageSummary = {
   messageId: number
   accountId: number
@@ -52,12 +39,6 @@ export type MailMessageAttachment = {
   sizeBytes: number
 }
 
-export type AttachmentDownloadResult = {
-  downloaded: boolean
-  attachmentId: number
-  filePath?: string
-}
-
 export type MailMessageBody = {
   messageId: number
   bodyText?: string
@@ -71,6 +52,7 @@ export type MailMessageBodyLoadResult = {
 }
 
 export type MailMessageDetail = MailMessageSummary & {
+  sizeBytes: number
   body?: MailMessageBody
   attachments: MailMessageAttachment[]
 }
@@ -179,79 +161,10 @@ export type OutboxListQuery = {
   limit?: number
 }
 
-export type MessageDeleteMode = 'trash' | 'permanent' | 'local_hide'
-
-export type MessageDeleteInput = {
-  messageId: number
-  mode?: MessageDeleteMode
-  allowLocalHide?: boolean
-}
-
-export type MessageDeleteResult = {
-  messageId: number
-  accountId?: number
-  mode: MessageDeleteMode
-  deleted: boolean
-  localOnly: boolean
-  error?: string
-}
-
-export type MessageBulkDeleteInput = {
-  messageIds: number[]
-  mode?: MessageDeleteMode
-  allowLocalHide?: boolean
-}
-
-export type MessageBulkDeleteFailure = {
-  messageId: number
-  accountId?: number
-  error: string
-}
-
-export type MessageBulkDeleteResult = {
-  mode: MessageDeleteMode
-  succeededMessageIds: number[]
-  failedItems: MessageBulkDeleteFailure[]
-  deletedCount: number
-  failedCount: number
-  operationBatchId?: string
-}
-
-export type MessageRestoreResult = {
-  messageId: number
-  accountId?: number
-  restored: boolean
-  localOnly: boolean
-  error?: string
-}
-
 export type MessageReadStateUpdate = {
   messageId: number
   accountId: number
   folderId: number
   isRead: boolean
-}
-
-export type MessageBulkReadStateFailure = {
-  messageId: number
-  accountId?: number
-  error: string
-}
-
-export type MessageBulkReadStateInput = {
-  messageIds: number[]
-  isRead: boolean
-}
-
-export type MessageBulkReadStateResult = {
-  isRead: boolean
-  updates: MessageReadStateUpdate[]
-  succeededMessageIds: number[]
-  failedItems: MessageBulkReadStateFailure[]
-  updatedCount: number
-  failedCount: number
-}
-
-export type MessageMarkAllReadInput = {
-  query?: MessageListQuery
+  remoteSynced?: boolean
 }

@@ -1,5 +1,7 @@
 use super::context::truncate_chars;
-use super::provider::{map_status_error, CompletionRequest, CompletionResponse};
+use super::provider::{
+    is_missing_endpoint_error, map_status_error, CompletionRequest, CompletionResponse,
+};
 use super::*;
 use reqwest::StatusCode;
 
@@ -18,12 +20,26 @@ fn accepts_https_and_loopback_http_base_urls() {
         openai.endpoint.as_str(),
         "https://api.openai.com/v1/chat/completions"
     );
+    assert!(openai.fallback_endpoint.is_none());
 
     let local = validate_settings("http://127.0.0.1:11434/v1/", "local-model").unwrap();
     assert_eq!(local.base_url, "http://127.0.0.1:11434/v1");
     assert_eq!(
         local.endpoint.as_str(),
         "http://127.0.0.1:11434/v1/chat/completions"
+    );
+    assert!(local.fallback_endpoint.is_none());
+
+    let lm_studio =
+        validate_settings("http://127.0.0.1:1234", "qwen3-4b-instruct-2507-mlx").unwrap();
+    assert_eq!(lm_studio.base_url, "http://127.0.0.1:1234");
+    assert_eq!(
+        lm_studio.endpoint.as_str(),
+        "http://127.0.0.1:1234/chat/completions"
+    );
+    assert_eq!(
+        lm_studio.fallback_endpoint.unwrap().as_str(),
+        "http://127.0.0.1:1234/v1/chat/completions"
     );
 
     assert!(validate_settings("http://[::1]:1234/v1", "local-model").is_ok());
@@ -129,6 +145,19 @@ fn serializes_malicious_email_tags_inside_one_untrusted_json_message() {
 fn not_found_invalidates_saved_verification() {
     assert!(map_status_error(StatusCode::NOT_FOUND).invalidates_verification);
     assert!(!map_status_error(StatusCode::TOO_MANY_REQUESTS).invalidates_verification);
+}
+
+#[test]
+fn only_missing_endpoint_errors_trigger_the_local_fallback() {
+    assert!(is_missing_endpoint_error(
+        br#"{"error":"Unexpected endpoint or method. (POST /chat/completions)"}"#
+    ));
+    assert!(!is_missing_endpoint_error(
+        br#"{"error":{"message":"Model not found"}}"#
+    ));
+    assert!(!is_missing_endpoint_error(
+        br#"{"choices":[{"message":{"content":"OK"}}]}"#
+    ));
 }
 
 #[test]

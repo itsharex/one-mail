@@ -3,20 +3,13 @@ import type {
   ComposeDraft as SharedComposeDraft,
   MailAccount,
   MailAddressInput,
-  MailMessageDetail,
-  MailMessageBody,
-  MailMessageSummary,
   MailSendInput,
-  MessageFilterTag,
-  MessageListQuery,
   OutboxMessage as SharedOutboxMessage,
   SystemInfo
 } from '@renderer/shared/types'
-import type { Account, Message, MessageFolderRole } from '@renderer/components/mail/types'
-import { normalizeMailBodyText, normalizeMailDisplayText } from '@renderer/shared/mail-text'
+import type { Account } from '@renderer/components/mail/types'
 import { normalizeLocale, translate } from '@renderer/lib/i18n'
 import {
-  MESSAGE_LIST_PAGE_SIZE,
   type ComposeDraftInput,
   type ComposeDraft,
   type SendMessageInput,
@@ -28,8 +21,6 @@ const platformLabel: Partial<Record<NodeJS.Platform, string>> = {
   win32: 'Windows',
   linux: 'Linux'
 }
-
-const ATTACHMENT_METADATA_PENDING_SIZE = '__pending__'
 
 export function getPlatformName(info?: SystemInfo): string {
   if (!info) return 'Desktop'
@@ -90,61 +81,6 @@ function formatAccountName(account: MailAccount): string {
   const label = account.accountLabel?.trim()
   if (!label || label === account.email) return account.email
   return `${label}(${account.email})`
-}
-
-export function toMessage(message: MailMessageSummary | MailMessageDetail): Message {
-  const detailLoaded = 'attachments' in message
-  const body = detailLoaded ? message.body : undefined
-  const fromName = normalizeMailDisplayText(message.fromName)
-  const fromEmail = normalizeMailDisplayText(message.fromEmail)
-  const subject = normalizeMailDisplayText(message.subject) ?? ''
-  const snippet = normalizeMailDisplayText(message.snippet) ?? ''
-  const bodyText = normalizeMailBodyText(body?.bodyText)
-
-  return {
-    id: String(message.messageId),
-    messageId: message.messageId,
-    accountId: message.accountId,
-    folderId: message.folderId,
-    folderRole: readOptionalString(message, 'folderRole') as MessageFolderRole | undefined,
-    folderName: readOptionalString(message, 'folderName'),
-    from: fromName ?? fromEmail ?? '',
-    fromAddress: fromEmail,
-    to: normalizeMailDisplayText(readOptionalString(message, 'to')),
-    cc: normalizeMailDisplayText(readOptionalString(message, 'cc')),
-    replyTo: normalizeMailDisplayText(readOptionalString(message, 'replyTo')),
-    messageRfc822Id: normalizeMailDisplayText(readOptionalString(message, 'messageRfc822Id')),
-    references: normalizeMailDisplayText(readOptionalString(message, 'references')),
-    subject,
-    preview: snippet,
-    verificationCode: normalizeMailDisplayText(message.verificationCode),
-    body: bodyTextToParagraphs(bodyText),
-    html: body?.bodyHtmlSanitized,
-    bodyStatus: message.bodyStatus,
-    bodyError: message.bodyError,
-    bodyLoaded: detailLoaded && message.bodyStatus === 'ready',
-    detailLoaded,
-    externalImagesBlocked: body?.externalImagesBlocked,
-    receivedAt: message.receivedAt,
-    time: formatMessageTime(message.receivedAt),
-    dateLabel: formatMessageDate(message.receivedAt),
-    unread: !message.isRead,
-    starred: message.isStarred,
-    attachments:
-      'attachments' in message
-        ? message.attachments
-            .filter((attachment) => attachment.filename.trim() && attachment.sizeBytes > 0)
-            .map((attachment) => ({
-              id: attachment.attachmentId,
-              name: normalizeMailDisplayText(attachment.filename) ?? attachment.filename,
-              size: formatBytes(attachment.sizeBytes),
-              type: attachment.mimeType ?? '',
-              disposition: attachment.contentDisposition
-            }))
-        : message.hasAttachments
-          ? [{ name: '', size: ATTACHMENT_METADATA_PENDING_SIZE, type: '' }]
-          : []
-  }
 }
 
 export function createLocalDraft(input: ComposeDraftInput): ComposeDraft {
@@ -244,84 +180,6 @@ function parseAddressInput(value: string): MailAddressInput {
   return {
     name: match[1].trim() || undefined,
     email: match[2].trim()
-  }
-}
-
-function readOptionalString(source: unknown, key: string): string | undefined {
-  if (!source || typeof source !== 'object') return undefined
-  const value = (source as Record<string, unknown>)[key]
-  return typeof value === 'string' ? value : undefined
-}
-
-export function mergeMessageBody(message: Message, body: MailMessageBody): Message {
-  const bodyText = normalizeMailBodyText(body.bodyText)
-
-  return {
-    ...message,
-    body: bodyTextToParagraphs(bodyText),
-    html: body.bodyHtmlSanitized,
-    bodyStatus: 'ready',
-    bodyError: undefined,
-    bodyLoaded: true,
-    detailLoaded: true,
-    externalImagesBlocked: body.externalImagesBlocked
-  }
-}
-
-function bodyTextToParagraphs(value?: string): string[] {
-  if (!value) return []
-  return value
-    .split(/\n{2,}/)
-    .map((paragraph) => paragraph.trim())
-    .filter(Boolean)
-}
-
-function formatBytes(value: number): string {
-  if (!value) return ''
-  if (value < 1024) return `${value} B`
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
-  return `${(value / 1024 / 1024).toFixed(1)} MB`
-}
-
-function formatMessageTime(value?: string): string {
-  if (!value) return '--:--'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '--:--'
-
-  return new Intl.DateTimeFormat(undefined, {
-    hour: '2-digit',
-    minute: '2-digit'
-  }).format(date)
-}
-
-function formatMessageDate(value?: string): string {
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-
-  const today = new Date()
-  if (date.toDateString() === today.toDateString()) return ''
-
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric'
-  }).format(date)
-}
-
-export function toMessageQuery(
-  selectedAccountId: string,
-  filters: MessageFilterTag[],
-  pagination?: Pick<MessageListQuery, 'limit' | 'offset'>,
-  searchKeyword?: string
-): MessageListQuery {
-  const keyword = searchKeyword?.trim()
-
-  return {
-    accountId: selectedAccountId === 'all' ? undefined : Number(selectedAccountId),
-    filters,
-    keyword: keyword || undefined,
-    limit: pagination?.limit ?? MESSAGE_LIST_PAGE_SIZE,
-    offset: pagination?.offset ?? 0
   }
 }
 

@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use reqwest::{redirect::Policy, Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use super::ValidatedAiSettings;
 
@@ -104,32 +105,66 @@ pub(super) async fn send_completion(
         stream: false,
         max_tokens,
     };
-    let mut request_builder = client.post(settings.endpoint.clone()).json(&request);
+    match send_completion_to_endpoint(client, &settings.endpoint, api_key, &request).await {
+        Ok(completion) => Ok(completion),
+        Err((error, retry_with_v1)) => {
+            let Some(fallback_endpoint) = settings
+                .fallback_endpoint
+                .as_ref()
+                .filter(|_| retry_with_v1)
+            else {
+                return Err(error);
+            };
+            send_completion_to_endpoint(client, fallback_endpoint, api_key, &request)
+                .await
+                .map_err(|(error, _)| error)
+        }
+    }
+}
+
+async fn send_completion_to_endpoint(
+    client: &Client,
+    endpoint: &Url,
+    api_key: Option<&str>,
+    request: &CompletionRequest<'_>,
+) -> Result<Completion, (AiHttpError, bool)> {
+    let mut request_builder = client.post(endpoint.clone()).json(request);
     if let Some(api_key) = api_key {
         request_builder = request_builder.bearer_auth(api_key);
     }
-    let response = request_builder.send().await.map_err(map_transport_error)?;
+    let response = request_builder
+        .send()
+        .await
+        .map_err(|error| (map_transport_error(error), false))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(map_status_error(status));
+        return Err((map_status_error(status), status == StatusCode::NOT_FOUND));
     }
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
-        return Err(AiHttpError::new("AI 服务响应过大。", false));
+        return Err((AiHttpError::new("AI 服务响应过大。", false), false));
     }
 
     let mut response = response;
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(map_transport_error)? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| (map_transport_error(error), false))?
+    {
         if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err(AiHttpError::new("AI 服务响应过大。", false));
+            return Err((AiHttpError::new("AI 服务响应过大。", false), false));
         }
         bytes.extend_from_slice(&chunk);
     }
-    let payload: CompletionResponse = serde_json::from_slice(&bytes)
-        .map_err(|_| AiHttpError::new("AI 服务返回了无法识别的响应。", false))?;
+    let payload: CompletionResponse = serde_json::from_slice(&bytes).map_err(|_| {
+        (
+            AiHttpError::new("AI 服务返回了无法识别的响应。", false),
+            is_missing_endpoint_error(&bytes),
+        )
+    })?;
     let content = payload
         .choices
         .into_iter()
@@ -139,9 +174,19 @@ pub(super) async fn send_completion(
         .trim()
         .to_string();
     if content.is_empty() {
-        return Err(AiHttpError::new("AI 服务没有返回文本内容。", false));
+        return Err((AiHttpError::new("AI 服务没有返回文本内容。", false), false));
     }
     Ok(Completion { content })
+}
+
+pub(super) fn is_missing_endpoint_error(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .is_some_and(|body| {
+            body.get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.starts_with("Unexpected endpoint or method"))
+        })
 }
 
 fn map_transport_error(error: reqwest::Error) -> AiHttpError {

@@ -41,7 +41,8 @@ export function createDesktopApi(): OneMailApi {
     conversations: {
       list: (query) => command('conversations_list', { query }),
       messages: (query) => command('conversations_messages', { query }),
-      findMessage: (messageId) => command('conversations_find_message', { messageId })
+      findMessage: (messageId) => command('conversations_find_message', { messageId }),
+      search: (keyword, limit, offset) => command('conversations_search', { keyword, limit, offset })
     },
     accounts: {
       list: () => command('accounts_list'),
@@ -53,27 +54,14 @@ export function createDesktopApi(): OneMailApi {
       closeAddWindow: () => command('accounts_close_add_window'),
       update: (input) => command('accounts_update', { input }),
       reauthorize: (accountId) => command('accounts_reauthorize', { accountId }),
-      disable: (accountId) => command('accounts_disable', { accountId }),
       remove: (accountId) => command('accounts_remove', { accountId })
     },
-    logos: {
-      get: (domain) => command('logos_get', { domain })
-    },
     messages: {
-      list: (query) => command('messages_list', { query }),
       stats: () => command('messages_stats'),
       get: (messageId) => command('messages_get', { messageId }),
       loadBody: (messageId) => command('messages_load_body', { messageId }),
       setReadState: (messageId, isRead) =>
-        command('messages_set_read_state', { messageId, isRead }),
-      bulkSetReadState: (input) => command('messages_bulk_set_read_state', { input }),
-      markAllRead: (input) => command('messages_mark_all_read', { input }),
-      downloadAttachment: (attachmentId) =>
-        command('messages_download_attachment', { attachmentId }),
-      delete: (input) => command('messages_delete', { input }),
-      bulkDelete: (input) => command('messages_bulk_delete', { input }),
-      hideLocal: (messageId) => command('messages_hide_local', { messageId }),
-      restore: (messageId) => command('messages_restore', { messageId })
+        command('messages_set_read_state', { messageId, isRead })
     },
     compose: {
       createReplyDraft: (input) => command('compose_create_reply_draft', { input }),
@@ -91,13 +79,11 @@ export function createDesktopApi(): OneMailApi {
       startAll: (mode) => command('sync_start_all', { mode }),
       startAccount: (accountId, mode) =>
         command('sync_start_account', { accountId, mode }),
-      status: () => command('sync_status'),
       onProgress: (callback) => subscribe<SyncProgressEvent>('sync/progress', callback),
       onMailboxChanged: (callback) =>
         subscribe<MailboxChangedEvent>('sync/mailboxChanged', callback)
     },
     notifications: {
-      status: () => command('notifications_status'),
       onNewMail: (callback) =>
         subscribe<NewMailNotification>('notifications/newMail', callback)
     },
@@ -124,7 +110,6 @@ export function createDesktopApi(): OneMailApi {
       chat: (input) => command('ai_chat', { input })
     },
     updates: {
-      check: () => command('updates_check'),
       status: () => command('updates_status'),
       install: () => command('updates_install'),
       onStatus: (callback) => subscribe<AppUpdateStatus>('updates/status', callback)
@@ -132,9 +117,11 @@ export function createDesktopApi(): OneMailApi {
     system: {
       getTheme: () => command('system_get_theme'),
       info: () => command('system_info'),
+      memory: () => command('system_process_memory'),
+      databaseSize: () => command('system_database_size'),
       setTitleBarTheme: (theme) => command('system_set_title_bar_theme', { theme }),
-      revealDatabase: () => command('system_reveal_database'),
       revealLogs: () => command('system_reveal_logs'),
+      openDatabaseDirectory: () => command('system_open_database_directory'),
       reloadClient: () => command('system_reload_client'),
       openDevtools: () => command('system_open_devtools'),
       revealPath: (path) => command('system_reveal_path', { path }),

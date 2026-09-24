@@ -4,6 +4,7 @@ import { Suspense } from 'react'
 import { RouterProvider } from 'react-router/dom'
 
 import { appRouter } from './app/router'
+import { AppErrorBoundary } from './components/app-error-page'
 import BuildInfo from './components/build-info'
 import { SweepShine } from './components/sweep-shine'
 import { Toaster } from './components/ui/sonner'
@@ -12,23 +13,25 @@ import { queryClient } from './lib/query-client'
 
 function App(): React.JSX.Element {
   return (
-    <JotaiProvider>
-      <QueryClientProvider client={queryClient}>
-        <I18nProvider>
-          <Suspense
-            fallback={
-              <div className="grid min-h-screen place-items-center">
-                <SweepShine>OneMail</SweepShine>
-              </div>
-            }
-          >
-            <RouterProvider router={appRouter} />
-          </Suspense>
-          <Toaster richColors position="top-right" />
-          <BuildInfo />
-        </I18nProvider>
-      </QueryClientProvider>
-    </JotaiProvider>
+    <AppErrorBoundary>
+      <JotaiProvider>
+        <QueryClientProvider client={queryClient}>
+          <I18nProvider>
+            <Suspense
+              fallback={
+                <div className="grid min-h-screen place-items-center">
+                  <SweepShine>OneMail</SweepShine>
+                </div>
+              }
+            >
+              <RouterProvider router={appRouter} />
+            </Suspense>
+            <Toaster richColors position="top-right" />
+            <BuildInfo />
+          </I18nProvider>
+        </QueryClientProvider>
+      </JotaiProvider>
+    </AppErrorBoundary>
   )
 }
 

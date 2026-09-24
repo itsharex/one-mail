@@ -9,6 +9,11 @@ use tauri::{AppHandle, Emitter, Manager, State, Theme, WebviewUrl, WebviewWindow
 
 use crate::{client_log, db, state::AppState};
 
+#[tauri::command]
+pub fn network_activity_status(state: State<'_, AppState>) -> Value {
+    serde_json::to_value(state.network_activity.snapshot()).expect("network snapshot is serializable")
+}
+
 static PENDING_NOTIFICATION_MESSAGE: OnceLock<Mutex<Option<Value>>> = OnceLock::new();
 static APP_THEME: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static NEXT_NOTIFICATION_CLICK_ID: AtomicU64 = AtomicU64::new(1);
@@ -91,6 +96,8 @@ async fn provider_icon(app: &AppHandle, provider_key: Option<&str>) -> Option<st
         if path.metadata().is_ok_and(|metadata| metadata.len() > 8) {
             return Some(path);
         }
+        let activity_state = app.try_state::<AppState>();
+        let _network_request = activity_state.as_ref().map(|state| state.network_activity.begin("icon"));
         let response = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build().ok()?
@@ -129,6 +136,36 @@ pub fn system_info(state: State<'_, AppState>) -> Value {
 }
 
 #[tauri::command]
+pub fn system_process_memory() -> Result<u64, String> {
+    let pid = sysinfo::get_current_pid().map_err(|error| error.to_string())?;
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_memory(),
+    );
+    system.process(pid)
+        .map(|process| process.memory())
+        .ok_or_else(|| "无法读取应用内存占用。".to_string())
+}
+
+#[tauri::command]
+pub fn system_database_size(state: State<'_, AppState>) -> Result<u64, String> {
+    let database = &state.database_path;
+    let main_size = std::fs::metadata(database)
+        .map_err(|error| format!("读取数据库大小失败：{error}"))?
+        .len();
+    let mut wal_name = database.as_os_str().to_os_string();
+    wal_name.push("-wal");
+    let wal_size = match std::fs::metadata(wal_name) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(format!("读取数据库 WAL 大小失败：{error}")),
+    };
+    Ok(main_size + wal_size)
+}
+
+#[tauri::command]
 pub fn system_set_title_bar_theme(window: WebviewWindow, theme: String) -> Result<bool, String> {
     let next_theme = match theme.as_str() {
         "light" => Theme::Light,
@@ -153,14 +190,15 @@ pub fn system_get_theme() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-pub fn system_reveal_database(state: State<'_, AppState>) -> Result<bool, String> {
-    reveal_path(&state.database_path)?;
-    Ok(true)
+pub fn system_reveal_logs(app: AppHandle) -> Result<bool, String> {
+    client_log::reveal(&app)
 }
 
 #[tauri::command]
-pub fn system_reveal_logs(app: AppHandle) -> Result<bool, String> {
-    client_log::reveal(&app)
+pub fn system_open_database_directory(state: State<'_, AppState>) -> Result<bool, String> {
+    let directory = state.database_path.parent().ok_or("数据库目录无效。")?;
+    open::that(directory).map_err(|error| format!("打开数据库目录失败：{error}"))?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -200,7 +238,6 @@ pub fn system_open_external(url: String) -> Result<bool, String> {
     Ok(true)
 }
 
-#[tauri::command]
 pub async fn system_send_notification(
     app: AppHandle,
     title: String,
@@ -368,11 +405,10 @@ pub fn accounts_open_add_window(app: AppHandle) -> Result<bool, String> {
         "add-account",
         WebviewUrl::App("index.html#/accounts/new".into()),
     )
-    .title("添加账号 - OneMail")
-    .inner_size(440.0, 460.0)
+    .title("添加账户")
+    .inner_size(480.0, 520.0)
     .min_inner_size(440.0, 460.0)
-    .max_inner_size(440.0, 460.0)
-    .resizable(false)
+    .resizable(true)
     .center()
     .build()
     .map_err(|error| format!("创建添加账号窗口失败：{error}"))?;
@@ -407,17 +443,10 @@ pub fn settings_open_window(app: AppHandle, section: Option<String>) -> Result<b
 }
 
 #[tauri::command]
-pub fn settings_close_window(app: AppHandle) -> Result<bool, String> {
-    if let Some(window) = app.get_webview_window("settings") {
-        window.close().map_err(|error| format!("关闭设置窗口失败：{error}"))?;
-    }
-    Ok(true)
-}
-
-#[tauri::command]
-pub fn original_message_open_window(app: AppHandle) -> Result<bool, String> {
+pub fn original_message_open_window(app: AppHandle, subject: Option<String>) -> Result<bool, String> {
+    let title = subject.as_deref().map(str::trim).filter(|value| !value.is_empty()).unwrap_or("无主题");
     if let Some(window) = app.get_webview_window("original-message") {
-        window.show().and_then(|_| window.set_focus())
+        window.set_title(title).and_then(|_| window.show()).and_then(|_| window.set_focus())
             .map_err(|error| format!("打开邮件原文窗口失败：{error}"))?;
         return Ok(true);
     }
@@ -426,7 +455,7 @@ pub fn original_message_open_window(app: AppHandle) -> Result<bool, String> {
         "original-message",
         WebviewUrl::App("index.html#/original-message".into()),
     )
-    .title("邮件原文 - OneMail")
+    .title(title)
     .inner_size(960.0, 740.0)
     .min_inner_size(620.0, 480.0)
     .center()

@@ -34,7 +34,7 @@ export function AccountFormField({
         ) : null}
       </FieldLabel>
       {children}
-      {error ? <FieldError>{error}</FieldError> : null}
+      {error ? <FieldError id={`${id}-error`}>{error}</FieldError> : null}
     </Field>
   )
 }

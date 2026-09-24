@@ -366,6 +366,7 @@ export const providerPresets: ProviderPreset[] = [
 ]
 
 export function createAccountSchema(t: (key: TranslationKey) => string) {
+  const emailSchema = z.email()
   return z
     .object({
       kind: z.enum(accountKinds),
@@ -404,8 +405,8 @@ export function createAccountSchema(t: (key: TranslationKey) => string) {
     .superRefine((value, context) => {
       if (
         value.kind !== 'outlook' &&
-        value.authType !== 'oauth2' &&
-        !z.email().safeParse(value.email).success
+        (value.authType !== 'oauth2' || Boolean(value.email)) &&
+        !emailSchema.safeParse(value.email).success
       ) {
         context.addIssue({
           code: 'custom',

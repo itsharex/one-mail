@@ -2,12 +2,12 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import * as React from 'react'
 import { useForm } from 'react-hook-form'
 
-import { ResponsiveDialog } from '@renderer/components/responsive-dialog'
 import { UnderlineHover } from '@renderer/components/underline-hover'
 import { Alert, AlertDescription } from '@renderer/components/ui/alert'
 import { Button } from '@renderer/components/ui/button'
 import { FieldError, FieldGroup } from '@renderer/components/ui/field'
 import { useI18n } from '@renderer/lib/i18n'
+import { getProviderLogoMetadata } from '@renderer/shared/provider-metadata'
 import {
   Select,
   SelectContent,
@@ -37,12 +37,6 @@ import { OutlookAccountForm } from './outlook-account-form'
 const ACCOUNT_ADD_GUIDE_URL =
   'https://huzhihui.com/blog/personal-email-account-add-guide-imap-smtp-app-password'
 
-type AddAccountDialogProps = {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onSubmit: (input: AccountCreateInput) => Promise<void>
-}
-
 type AddAccountFormProps = {
   onSubmit: (input: AccountCreateInput) => Promise<void>
   className?: string
@@ -58,20 +52,18 @@ export function AddAccountForm({
 }: AddAccountFormProps): React.JSX.Element {
   const { t } = useI18n()
   const accountSchema = React.useMemo(() => createAccountSchema(t), [t])
-  const [pending, setPending] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
-  const [kind, setKind] = React.useState<AccountKind>(defaultAccountFormValues.kind)
   const form = useForm<AccountFormValues>({
     resolver: zodResolver(accountSchema),
     defaultValues: defaultAccountFormValues,
     mode: 'onSubmit'
   })
+  const kind = form.watch('kind')
   const currentAuthType = form.watch('authType')
 
   function handleKindChange(nextKind: string): void {
     const preset = getProviderPreset(nextKind as AccountKind)
 
-    setKind(preset.kind)
     form.setValue('kind', preset.kind)
     form.setValue('providerKey', preset.providerKey)
     form.setValue('authType', preset.authType)
@@ -88,7 +80,6 @@ export function AddAccountForm({
   }
 
   async function handleSubmit(values: AccountFormValues): Promise<void> {
-    setPending(true)
     setError(null)
 
     const preset = resolveProviderPreset(values.kind, values.email)
@@ -128,11 +119,8 @@ export function AddAccountForm({
           authType !== 'oauth2' && values.syncFolders.length > 0 ? values.syncFolders : undefined
       })
       form.reset(defaultAccountFormValues)
-      setKind(defaultAccountFormValues.kind)
     } catch (submitError) {
       setError(formatAccountSubmitError(submitError, t('account.add.saveError'), values.kind))
-    } finally {
-      setPending(false)
     }
   }
 
@@ -140,11 +128,10 @@ export function AddAccountForm({
     <form
       id="add-account-form"
       className={className}
+      noValidate
       onSubmit={form.handleSubmit((values) => handleSubmit(values))}
     >
       <div className={bodyClassName}>
-        <AccountAddGuideHint kind={kind} />
-
         {error ? (
           <FieldError className="rounded-md border border-destructive/25 bg-destructive/5 p-2 text-xs leading-5">
             {error}
@@ -154,12 +141,18 @@ export function AddAccountForm({
         <AccountFormField id="account-kind" label={t('account.form.type')} required>
           <Select value={kind} onValueChange={handleKindChange} required>
             <SelectTrigger id="account-kind" aria-label={t('account.form.type')} className="w-full">
-              <SelectValue placeholder={t('account.form.type')} />
+              <SelectValue>
+                <span className="flex min-w-0 items-center gap-2">
+                  <ProviderNetworkLogo key={kind} providerKey={getProviderPreset(kind).providerKey} />
+                  {t(getProviderPreset(kind).labelKey)}
+                </span>
+              </SelectValue>
             </SelectTrigger>
             <SelectContent viewportClassName="max-h-64 overflow-y-auto">
               <SelectGroup>
                 {providerPresets.map((preset) => (
                   <SelectItem key={preset.kind} value={preset.kind}>
+                    <ProviderNetworkLogo providerKey={preset.providerKey} />
                     {t(preset.labelKey)}
                   </SelectItem>
                 ))}
@@ -168,16 +161,17 @@ export function AddAccountForm({
           </Select>
         </AccountFormField>
 
+        <AccountAddGuideHint kind={kind} />
+
         <FieldGroup className="gap-2.5">
           {renderProviderForm(kind, form, t)}
           {currentAuthType !== 'oauth2' ? <ImapFolderSelector form={form} kind={kind} /> : null}
         </FieldGroup>
-
       </div>
 
       <div className={footerClassName}>
-        <Button type="submit" disabled={pending}>
-          {pending
+        <Button type="submit" disabled={form.formState.isSubmitting}>
+          {form.formState.isSubmitting
             ? kind === 'outlook' || (kind === 'gmail' && currentAuthType === 'oauth2')
               ? t('account.add.waitingAuth')
               : t('common.testing')
@@ -192,32 +186,24 @@ export function AddAccountForm({
   )
 }
 
-export function AddAccountDialog({
-  open,
-  onOpenChange,
-  onSubmit
-}: AddAccountDialogProps): React.JSX.Element {
-  const { t } = useI18n()
-
-  function handleOpenChange(nextOpen: boolean): void {
-    onOpenChange(nextOpen)
-  }
+function ProviderNetworkLogo({ providerKey }: { providerKey: string }): React.JSX.Element {
+  const { domain, fallback } = getProviderLogoMetadata(providerKey)
+  const [failed, setFailed] = React.useState(false)
 
   return (
-    <ResponsiveDialog
-      open={open}
-      onOpenChange={handleOpenChange}
-      title={t('account.add.title')}
-      contentClassName="h-[min(560px,calc(100vh-2rem))] grid-rows-[auto_minmax(0,1fr)] gap-3 p-4 sm:w-[440px] sm:max-w-[440px]"
-      bodyClassName="min-h-0"
-    >
-      <AddAccountForm
-        key={open ? 'open' : 'closed'}
-        onSubmit={onSubmit}
-        className="flex h-full min-h-0 flex-col gap-3"
-        bodyClassName="flex min-h-0 flex-1 flex-col gap-3 overflow-auto"
-      />
-    </ResponsiveDialog>
+    <span className="flex size-5 shrink-0 items-center justify-center overflow-hidden rounded bg-white text-[10px] font-semibold text-muted-foreground ring-1 ring-border/60">
+      {domain && !failed ? (
+        <img
+          src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=64`}
+          alt=""
+          aria-hidden="true"
+          className="size-4 object-contain"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <span aria-hidden="true">{fallback}</span>
+      )}
+    </span>
   )
 }
 

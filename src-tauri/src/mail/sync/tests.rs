@@ -1,4 +1,4 @@
-use super::imap::{uid_validity_changed, IMAP_SUMMARY_QUERY};
+use super::imap::{uid_validity_changed, update_cached_read_flag, IMAP_SUMMARY_QUERY};
 use super::{sync_skip_reason, upsert_message, FetchedMessage, SyncAccountTarget};
 use rusqlite::Connection;
 
@@ -129,6 +129,48 @@ fn sync_batch_commits_messages_and_cursor_together_or_rolls_back() {
 }
 
 #[test]
+fn reading_survives_stale_sync_flags_until_the_server_confirms_it() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection.execute_batch(include_str!("../../db/schema.sql")).unwrap();
+    connection.execute_batch(
+        "INSERT INTO onemail_provider_presets (provider_key,display_name,auth_type) VALUES ('test','Test','manual');
+         INSERT INTO onemail_mail_accounts (account_id,provider_key,email,normalized_email,account_label,auth_type,imap_host,imap_port,imap_security)
+         VALUES (1,'test','me@example.test','me@example.test','Test','manual','localhost',993,'ssl_tls');
+         INSERT INTO onemail_mail_folders (folder_id,account_id,path,name,role) VALUES (1,1,'INBOX','Inbox','inbox');"
+    ).unwrap();
+    let message = |is_read| FetchedMessage { uid: 1, is_read, ..FetchedMessage::default() };
+    upsert_message(&connection, 1, 1, &message(false)).unwrap();
+    connection.execute("UPDATE onemail_mail_messages SET is_read=1,read_state_override=1 WHERE uid=1", []).unwrap();
+
+    update_cached_read_flag(&connection, 1, 1, false).unwrap();
+    upsert_message(&connection, 1, 1, &message(false)).unwrap();
+    let state = || connection.query_row(
+        "SELECT is_read,read_state_override FROM onemail_mail_messages WHERE uid=1", [],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?))
+    ).unwrap();
+    assert_eq!(state(), (1, Some(1)));
+
+    update_cached_read_flag(&connection, 1, 1, true).unwrap();
+    assert_eq!(state(), (1, None));
+    upsert_message(&connection, 1, 1, &message(false)).unwrap();
+    assert_eq!(state(), (0, None));
+
+    connection.execute("UPDATE onemail_mail_messages SET is_read=1,read_state_override=1 WHERE uid=1", []).unwrap();
+    connection.execute_batch(
+        "INSERT INTO onemail_mail_folders (folder_id,account_id,path,name,role) VALUES (2,1,'API','API','inbox');
+         INSERT INTO onemail_folder_sync_states (folder_id,account_id,highest_modseq) VALUES (2,1,'gmail-history:42');
+         INSERT INTO onemail_mail_messages (account_id,folder_id,uid,is_read,read_state_override) VALUES (1,2,2,1,1);"
+    ).unwrap();
+    crate::db::clear_imap_read_overrides(&connection, Some(1)).unwrap();
+    assert_eq!(state(), (1, None));
+    let api_override: Option<i64> = connection.query_row(
+        "SELECT read_state_override FROM onemail_mail_messages WHERE folder_id=2", [],
+        |row| row.get(0)
+    ).unwrap();
+    assert_eq!(api_override, Some(1));
+}
+
+#[test]
 fn only_resets_a_folder_when_known_uid_validity_changes() {
     assert!(uid_validity_changed(Some("123"), Some("456")));
     assert!(!uid_validity_changed(Some("123"), Some("123")));
@@ -204,6 +246,7 @@ fn empty_sync_metadata_does_not_erase_existing_headers() {
                    snippet TEXT,
                    size_bytes INTEGER NOT NULL DEFAULT 0,
                    is_read INTEGER NOT NULL DEFAULT 0,
+                   read_state_override INTEGER,
                    has_attachments INTEGER NOT NULL DEFAULT 0,
                    flags_json TEXT NOT NULL DEFAULT '[]',
                    remote_deleted INTEGER NOT NULL DEFAULT 0,

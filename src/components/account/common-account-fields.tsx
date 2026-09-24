@@ -34,6 +34,7 @@ export function CommonAccountFields({
           placeholder="name@example.com"
           required
           aria-invalid={Boolean(form.formState.errors.email)}
+          aria-describedby={form.formState.errors.email ? 'account-email-error' : undefined}
           {...form.register('email')}
         />
       </AccountFormField>
@@ -51,6 +52,7 @@ export function CommonAccountFields({
           placeholder={passwordPlaceholder}
           required
           aria-invalid={Boolean(form.formState.errors.password)}
+          aria-describedby={form.formState.errors.password ? 'account-password-error' : undefined}
           {...form.register('password')}
         />
       </AccountFormField>
@@ -65,6 +67,7 @@ export function CommonAccountFields({
           autoComplete="off"
           placeholder={t('account.form.labelPlaceholder')}
           aria-invalid={Boolean(form.formState.errors.accountLabel)}
+          aria-describedby={form.formState.errors.accountLabel ? 'account-label-error' : undefined}
           {...form.register('accountLabel')}
         />
       </AccountFormField>

@@ -10,7 +10,22 @@ pub fn initialize(state: &AppState) -> Result<(), String> {
         .execute_batch(SCHEMA_SQL)
         .map_err(|error| format!("初始化数据库失败：{error}"))?;
     ensure_compatibility(&connection)?;
+    clear_imap_read_overrides(&connection, None)?;
     recover_interrupted_syncs(&connection)
+}
+
+pub(crate) fn clear_imap_read_overrides(connection: &Connection, account_id: Option<i64>) -> Result<(), String> {
+    connection.execute(
+        "UPDATE onemail_mail_messages AS m SET read_state_override=NULL
+         WHERE read_state_override IS NOT NULL AND (?1 IS NULL OR m.account_id=?1)
+           AND m.folder_id IN (
+             SELECT f.folder_id FROM onemail_mail_folders f
+             LEFT JOIN onemail_folder_sync_states s ON s.folder_id=f.folder_id
+             WHERE COALESCE(s.highest_modseq,'') NOT LIKE 'gmail-history:%'
+               AND COALESCE(s.highest_modseq,'') NOT LIKE 'graph-delta:%')",
+        [account_id],
+    ).map_err(|error| format!("清理已完成的 IMAP 已读状态保护失败：{error}"))?;
+    Ok(())
 }
 
 fn recover_interrupted_syncs(connection: &Connection) -> Result<(), String> {
@@ -100,6 +115,12 @@ fn ensure_compatibility(connection: &Connection) -> Result<(), String> {
         "onemail_mail_messages",
         "last_operation_at",
         "TEXT",
+    )?;
+    add_column_if_missing(
+        connection,
+        "onemail_mail_messages",
+        "read_state_override",
+        "INTEGER CHECK (read_state_override IN (0, 1))",
     )?;
 
     add_column_if_missing(connection, "onemail_outbox_messages", "raw_mime", "TEXT")?;

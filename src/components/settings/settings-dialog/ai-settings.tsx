@@ -79,7 +79,11 @@ export function AiSettingsForm({
       setMessage(t('settings.ai.verifiedSuccess'))
     } catch (verifyError) {
       setFormError(
-        verifyError instanceof Error ? verifyError.message : t('settings.ai.verifyError')
+        verifyError instanceof Error
+          ? verifyError.message
+          : typeof verifyError === 'string'
+            ? verifyError
+            : t('settings.ai.verifyError')
       )
     } finally {
       setPending(null)

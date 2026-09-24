@@ -1,7 +1,5 @@
 import type { MailAttachmentInput, OutboxMessage as SharedOutboxMessage } from '@renderer/shared/types'
 
-export const MESSAGE_LIST_PAGE_SIZE = 100
-
 export type ComposeKind = 'new' | 'reply' | 'reply_all' | 'forward'
 
 export type ComposeDraftInput = {
@@ -49,41 +47,6 @@ export type SendMessageResult = {
   messageId?: string
   outboxId?: number
   warning?: string
-}
-
-export type DeleteMessageInput = {
-  messageId: number
-  permanent?: boolean
-}
-
-export type DeleteMessageResult = {
-  messageId: number
-  deleted: boolean
-  permanent?: boolean
-  hidden?: boolean
-  error?: string
-}
-
-export type BulkDeleteMessagesInput = {
-  messageIds: number[]
-  permanent?: boolean
-}
-
-export type BulkDeleteMessagesResult = {
-  succeededMessageIds: number[]
-  failedItems: Array<{ messageId: number; error: string }>
-  deletedCount: number
-  failedCount: number
-}
-
-export type HideMessageResult = {
-  messageId: number
-  hidden: boolean
-}
-
-export type RestoreMessageResult = {
-  messageId: number
-  restored: boolean
 }
 
 export type OutboxMessage = {

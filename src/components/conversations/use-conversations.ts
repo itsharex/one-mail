@@ -1,19 +1,45 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import type { ConversationLocation } from '@renderer/shared/conversations'
+import type { ConversationLocation, ConversationSearchResult } from '@renderer/shared/conversations'
 
 const PAGE_SIZE = 40
 const STALE_TIME = 30_000
+export type ConversationTimeFilter = 'all' | 'today' | 'yesterday' | 'last3'
 
 export function useConversations(accountId?: number, refreshKey?: number) {
   const client = useQueryClient()
   const [keyword, setKeyword] = useState('')
   const [search, setSearch] = useState('')
+  const [timeFilter, setTimeFilter] = useState<ConversationTimeFilter>('today')
+  const [calendarDay, setCalendarDay] = useState(() => new Date().toDateString())
   const [selection, setSelection] = useState<{ scope: string; id: string | null } | null>(null)
   const [targetLocation, setTargetLocation] = useState<ConversationLocation | null>(null)
-  const [focusedMessageId, setFocusedMessageId] = useState<number | null>(null)
+  const [focusedMessageId, setFocusedMessageId] = useState<string | null>(null)
+  const [focusToken, setFocusToken] = useState(0)
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const scope = `${accountId ?? 'all'}:${search}`
+  const dateRange = useMemo(() => {
+    if (timeFilter === 'all') return null
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const dayStart = (offset: number) => {
+      const date = new Date(today)
+      date.setDate(date.getDate() + offset)
+      return date.getTime()
+    }
+    if (timeFilter === 'today') return { receivedFromMs: dayStart(0), receivedBeforeMs: dayStart(1) }
+    if (timeFilter === 'yesterday') return { receivedFromMs: dayStart(-1), receivedBeforeMs: dayStart(0) }
+    return { receivedFromMs: dayStart(-2), receivedBeforeMs: dayStart(1) }
+  }, [timeFilter, calendarDay])
+  const scope = `${accountId ?? 'all'}:${search}:${timeFilter}`
+
+  useEffect(() => {
+    if (timeFilter === 'all') return
+    const now = new Date()
+    const tomorrow = new Date(now)
+    tomorrow.setHours(24, 0, 0, 0)
+    const timer = setTimeout(() => setCalendarDay(tomorrow.toDateString()), tomorrow.getTime() - now.getTime())
+    return () => clearTimeout(timer)
+  }, [timeFilter, calendarDay])
 
   useEffect(() => {
     const timer = setTimeout(() => setSearch(keyword), keyword ? 250 : 0)
@@ -21,9 +47,9 @@ export function useConversations(accountId?: number, refreshKey?: number) {
   }, [keyword])
 
   const list = useInfiniteQuery({
-    queryKey: ['conversations', 'list', accountId ?? null, search, refreshKey ?? 0],
+    queryKey: ['conversations', 'list', accountId ?? null, search, dateRange?.receivedFromMs ?? null, dateRange?.receivedBeforeMs ?? null, refreshKey ?? 0],
     initialPageParam: 0,
-    queryFn: ({ pageParam }) => window.api.conversations.list({ accountId, keyword: search, limit: PAGE_SIZE, offset: pageParam }),
+    queryFn: ({ pageParam }) => window.api.conversations.list({ accountId, keyword: search, ...(dateRange ?? {}), limit: PAGE_SIZE, offset: pageParam }),
     getNextPageParam: (last, pages) => last.length === PAGE_SIZE ? pages.length * PAGE_SIZE : undefined,
     staleTime: STALE_TIME
   })
@@ -41,11 +67,23 @@ export function useConversations(accountId?: number, refreshKey?: number) {
     if (!location) return false
     setKeyword('')
     setSearch('')
+    setTimeFilter('all')
     setTargetLocation(location)
-    setFocusedMessageId(messageId)
-    setSelection({ scope: `${accountId ?? 'all'}:`, id: location.conversation.conversationId })
+    setFocusedMessageId(`message:${messageId}`)
+    setFocusToken((current) => current + 1)
+    setSelection({ scope: `${accountId ?? 'all'}::all`, id: location.conversation.conversationId })
     return true
   }, [accountId])
+
+  const openSearchResult = useCallback((result: ConversationSearchResult) => {
+    setKeyword('')
+    setSearch('')
+    setTimeFilter('all')
+    setTargetLocation(result)
+    setFocusedMessageId(result.message.id)
+    setFocusToken((current) => current + 1)
+    setSelection({ scope: `${result.message.accountId}::all`, id: result.conversation.conversationId })
+  }, [])
 
   const timeline = useInfiniteQuery({
     queryKey: ['conversations', 'messages', accountId ?? null, selectedId, focusedMessageId, refreshKey ?? 0],
@@ -80,7 +118,7 @@ export function useConversations(accountId?: number, refreshKey?: number) {
   }, [timeline.hasNextPage, timeline.isFetching, timeline.fetchNextPage])
 
   return {
-    keyword, setKeyword, selectedId, selected, setSelectedId, openMessage, focusedMessageId, conversations, messages,
+    keyword, setKeyword, timeFilter, setTimeFilter, selectedId, selected, setSelectedId, openMessage, openSearchResult, focusedMessageId, focusToken, conversations, messages,
     loading: list.isPending, loadingMore: list.isFetchingNextPage,
     loadingMessages: timeline.isPending, loadingOlder: timeline.isFetchingNextPage,
     error: list.error ? String(list.error) : '',

@@ -1,3 +1,4 @@
+mod network_activity;
 mod sync_tracking;
 
 use std::{
@@ -11,6 +12,7 @@ use std::{
 use rand::RngCore;
 pub(crate) use sync_tracking::{wait_for_batch, BatchStart, SYNC_CONCURRENCY};
 use sync_tracking::{SyncBatchTracker, SyncTracker};
+use network_activity::NetworkActivity;
 use tauri::{AppHandle, Manager};
 
 const DATABASE_KEY_PREFIX: &str = "ONEMAIL_DATABASE_KEY=";
@@ -24,6 +26,7 @@ pub struct AppState {
     oauth_refresh_locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     pub sync_tracker: SyncTracker,
     pub sync_batch_tracker: SyncBatchTracker,
+    pub network_activity: NetworkActivity,
 }
 
 impl AppState {
@@ -49,6 +52,7 @@ impl AppState {
             oauth_refresh_locks: Mutex::new(HashMap::new()),
             sync_tracker: SyncTracker::default(),
             sync_batch_tracker: SyncBatchTracker::default(),
+            network_activity: NetworkActivity::new(app),
         })
     }
 

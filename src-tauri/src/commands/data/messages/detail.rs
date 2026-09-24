@@ -48,12 +48,16 @@ pub(crate) fn get_message_detail(
         .query_row(
             "SELECT m.message_id,m.account_id,m.folder_id,f.role,f.name,
                     m.rfc822_message_id,m.references_header,m.subject,m.from_name,m.from_email,
-                    m.received_at,m.snippet,m.is_read,m.is_starred,m.has_attachments,m.body_status,m.body_error
+                    m.received_at,m.snippet,m.is_read,m.is_starred,m.has_attachments,m.body_status,m.body_error,m.size_bytes
              FROM onemail_mail_messages m
              JOIN onemail_mail_folders f ON f.folder_id=m.folder_id
              WHERE m.message_id=?1",
             [message_id],
-            map_message_summary,
+            |row| {
+                let mut summary = map_message_summary(row)?;
+                summary["sizeBytes"] = json!(row.get::<_, i64>(17)?);
+                Ok(summary)
+            },
         )
         .optional()
         .map_err(database_error)?;

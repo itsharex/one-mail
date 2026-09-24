@@ -9,7 +9,7 @@ export type SyncNotice = {
   message?: string
   progress?: { completed: number; total: number }
   activity?: { account: string; stage: string; folder?: string | null }
-  steps?: { account: string; stage: string; folder?: string | null }[]
+  steps?: { account: string; stage: string; folder?: string | null; at: number }[]
 }
 
 type SyncFeedback = {

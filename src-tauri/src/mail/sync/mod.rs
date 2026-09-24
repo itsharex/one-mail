@@ -153,13 +153,15 @@ pub async fn sync_account(
         None => return Ok(json!({ "accountId": account_id, "ok": false, "skipped": true, "busy": true, "error": "账号正在同步。" })),
     };
     let account = mail_transport::load_account(state, account_id)?;
+    let _network_request = state.network_activity.begin_for_account("sync", account_id);
     if let Some(emit) = on_step { emit(account_id, "connecting", None); }
     set_syncing(state, account_id)?;
 
     let result = tokio::time::timeout(ACCOUNT_SYNC_TIMEOUT, sync_account_inner(state, &account, mode, on_step))
         .await
         .unwrap_or_else(|_| Err("账号同步超过 60 分钟，已停止本次同步。".to_string()));
-    match result {
+    drop(_network_request);
+    let outcome = match result {
         Ok(mut value) => {
             let sync_error = (value.get("ok").and_then(Value::as_bool) == Some(false))
                 .then(|| value.get("error").and_then(Value::as_str).unwrap_or("部分文件夹同步失败。"));
@@ -195,7 +197,10 @@ pub async fn sync_account(
                 .map_err(|db_error| format!("保存同步错误失败：{db_error}"))?;
             Err(error)
         }
-    }
+    };
+    let connection = db::open(state)?;
+    db::clear_imap_read_overrides(&connection, Some(account_id))?;
+    outcome
 }
 
 async fn sync_account_inner(
@@ -404,7 +409,9 @@ fn upsert_message(
                    internal_date=COALESCE(NULLIF(TRIM(excluded.internal_date),''),onemail_mail_messages.internal_date),
                    snippet=COALESCE(NULLIF(TRIM(excluded.snippet),''),onemail_mail_messages.snippet),
                    size_bytes=CASE WHEN excluded.size_bytes>0 THEN excluded.size_bytes ELSE onemail_mail_messages.size_bytes END,
-                   is_read=excluded.is_read,
+                   is_read=COALESCE(onemail_mail_messages.read_state_override,excluded.is_read),
+                   read_state_override=CASE WHEN onemail_mail_messages.read_state_override=excluded.is_read
+                     THEN NULL ELSE onemail_mail_messages.read_state_override END,
                    has_attachments=excluded.has_attachments,remote_deleted=excluded.remote_deleted,
                    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
             params![

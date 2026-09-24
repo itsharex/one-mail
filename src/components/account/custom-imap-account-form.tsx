@@ -45,6 +45,7 @@ export function CustomImapAccountForm({ form }: CustomImapAccountFormProps): Rea
             placeholder="imap.example.com"
             required
             aria-invalid={Boolean(form.formState.errors.imapHost)}
+            aria-describedby={form.formState.errors.imapHost ? 'imap-host-error' : undefined}
             {...form.register('imapHost')}
           />
         </AccountFormField>
@@ -62,6 +63,7 @@ export function CustomImapAccountForm({ form }: CustomImapAccountFormProps): Rea
             max={65535}
             required
             aria-invalid={Boolean(form.formState.errors.imapPort)}
+            aria-describedby={form.formState.errors.imapPort ? 'imap-port-error' : undefined}
             {...form.register('imapPort', { valueAsNumber: true })}
           />
         </AccountFormField>
@@ -83,6 +85,7 @@ export function CustomImapAccountForm({ form }: CustomImapAccountFormProps): Rea
                 className="w-full"
                 aria-label={t('account.form.security')}
                 aria-invalid={Boolean(form.formState.errors.imapSecurity)}
+                aria-describedby={form.formState.errors.imapSecurity ? 'imap-security-error' : undefined}
               >
                 <SelectValue placeholder={t('account.form.security')} />
               </SelectTrigger>
@@ -143,6 +146,7 @@ export function CustomImapAccountForm({ form }: CustomImapAccountFormProps): Rea
                 placeholder="smtp.example.com"
                 required
                 aria-invalid={Boolean(form.formState.errors.smtpHost)}
+                aria-describedby={form.formState.errors.smtpHost ? 'smtp-host-error' : undefined}
                 {...form.register('smtpHost')}
               />
             </AccountFormField>
@@ -160,6 +164,7 @@ export function CustomImapAccountForm({ form }: CustomImapAccountFormProps): Rea
                 max={65535}
                 required
                 aria-invalid={Boolean(form.formState.errors.smtpPort)}
+                aria-describedby={form.formState.errors.smtpPort ? 'smtp-port-error' : undefined}
                 {...form.register('smtpPort', { valueAsNumber: true })}
               />
             </AccountFormField>
@@ -181,6 +186,7 @@ export function CustomImapAccountForm({ form }: CustomImapAccountFormProps): Rea
                     className="w-full"
                     aria-label={t('account.form.security')}
                     aria-invalid={Boolean(form.formState.errors.smtpSecurity)}
+                    aria-describedby={form.formState.errors.smtpSecurity ? 'smtp-security-error' : undefined}
                   >
                     <SelectValue placeholder={t('account.form.security')} />
                   </SelectTrigger>

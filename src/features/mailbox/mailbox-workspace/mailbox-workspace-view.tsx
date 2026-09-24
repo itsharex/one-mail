@@ -1,10 +1,8 @@
 import * as React from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { toast } from 'sonner'
-import type { ConversationMessage } from '@renderer/shared/conversations'
 import { ConversationWorkspace } from '@renderer/components/conversations/conversation-workspace'
 import { AccountList } from '@renderer/components/account/account-list'
-import { AiAssistant } from '@renderer/components/ai/ai-assistant'
 import { AccountWarningDialog } from '@renderer/components/account/account-warning-dialog'
 import { EditAccountDialog } from '@renderer/components/account/edit-account-dialog'
 import { RemoveAccountDialog } from '@renderer/components/account/remove-account-dialog'
@@ -18,9 +16,9 @@ import { NoAccountsBody, StatusBar, TitleBar } from '../mailbox-chrome'
 import { useMailboxWorkspaceController } from './use-mailbox-workspace-controller'
 
 export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMailboxWorkspaceController> }): React.JSX.Element {
-  const [aiOpenRequest, setAiOpenRequest] = React.useState<{ messageId: number; subject: string; token: number } | undefined>()
   const {
     loading,
+    loadingPhase,
     showNoAccounts,
     systemInfo,
     handleOpenAddAccountWindow,
@@ -39,6 +37,7 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
     setWarningAccountId,
     realAccounts,
     settings,
+    refreshAccounts,
     selectedAccount,
     aiSessionEpoch,
     openComposer,
@@ -85,7 +84,6 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
           <div className="relative shrink-0">
             <TitleBar
               platform={systemInfo?.platform}
-              onAddAccount={handleOpenAddAccountWindow}
               onOpenSettings={() => openSettings()}
             />
           </div>
@@ -113,7 +111,6 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
             <div className="workspace-sidebar flex h-full min-h-0 flex-col">
               <TitleBar
                 platform={systemInfo?.platform}
-                onAddAccount={handleOpenAddAccountWindow}
                 onOpenSettings={() => openSettings()}
               />
               <AccountList
@@ -147,14 +144,16 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
                 accounts={realAccounts}
                 settings={settings}
                 accountId={selectedAccount.accountId}
+                databasePath={systemInfo?.databasePath}
+                onSelectAccount={handleSelectAccount}
+                onAddAccount={handleOpenAddAccountWindow}
                 openMessageId={openMessageId}
                 onOpenMessageHandled={() => setOpenMessageId(null)}
                 refreshKey={aiSessionEpoch}
                 onCompose={() => { void openComposer('new') }}
                 onOpenOutbox={() => setOutboxOpen(true)}
-                onAskAi={aiSettings?.verified ? (message: ConversationMessage) => {
-                  if (message.messageId) setAiOpenRequest((previous) => ({ messageId: message.messageId!, subject: message.subject || '', token: (previous?.token ?? 0) + 1 }))
-                } : undefined}
+                aiSettings={aiSettings?.verified ? aiSettings : undefined}
+                onAiChat={aiSettings?.verified ? handleAiChat : undefined}
               />
             </div>
           </ResizablePanel>
@@ -163,8 +162,8 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
 
       <StatusBar
         loading={loading}
-        selectedAccount={selectedAccount}
-        accountAddresses={realAccounts.map((account) => account.address)}
+        loadingPhase={loadingPhase}
+        accounts={realAccounts}
         systemInfo={systemInfo}
         settings={settings}
         accountCount={realAccounts.length}
@@ -172,6 +171,9 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
         syncNotice={syncNotice}
         error={error}
         updateStatus={updateStatus}
+        onOpenAccountWarning={(accountId) => {
+          void refreshAccounts().catch(() => undefined).then(() => setWarningAccountId(accountId))
+        }}
         onOpenVersion={() => {
           if (hasAvailableUpdate(updateStatus)) {
             void openExternalUrl(ONEMAIL_HOMEPAGE_URL)
@@ -221,17 +223,6 @@ export function MailboxWorkspaceView({ model }: { model: ReturnType<typeof useMa
             setDialogKind('delete')
           }}
           onReauthorize={handleReauthorizeAccount}
-        />
-      ) : null}
-      {aiSettings?.verified ? (
-        <AiAssistant
-          key={aiSessionEpoch}
-          settings={aiSettings}
-          launcherHidden={composerOpen}
-          onChat={handleAiChat}
-          messageId={aiOpenRequest?.messageId}
-          messageSubject={aiOpenRequest?.subject}
-          openRequest={aiOpenRequest}
         />
       ) : null}
       <BackupImportDialog

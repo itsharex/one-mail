@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react'
-import { ChevronDown, ChevronUp, Image, ImageOff } from 'lucide-react'
+import { ChevronDown, ChevronUp, RotateCw } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Skeleton } from '@renderer/components/ui/skeleton'
-import { ImageLoadWarningDialog } from './image-load-warning-dialog'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@renderer/components/ui/tooltip'
 import { prepareMailHtml } from '@renderer/components/mail/mail-html'
 import {
   conversationHtmlToText,
@@ -13,18 +13,18 @@ import {
 import { openExternalUrl } from '@renderer/lib/api'
 import { toast } from 'sonner'
 import { useI18n } from '@renderer/lib/i18n'
+import { cn } from '@renderer/lib/utils'
 import type { ConversationMessage } from '@renderer/shared/conversations'
 import type { AppSettings } from '@renderer/shared/types'
 import { compactMailBodyText } from '@renderer/shared/mail-text'
 
 const COLLAPSED_HEIGHT = 240
 
-export function ConversationMessageContent({ message, refresh, bodyDisplayMode, externalImagesBlocked, children }: {
+export function ConversationMessageContent({ message, refresh, bodyDisplayMode, children }: {
   message: ConversationMessage
   refresh: () => void
   bodyDisplayMode: AppSettings['bodyDisplayMode']
-  externalImagesBlocked: boolean
-  children: ReactNode
+  children: (copyBody: string | null) => ReactNode
 }) {
   const { locale } = useI18n()
   const text = (cn: string, en: string) => locale === 'zh-CN' ? cn : en
@@ -36,8 +36,6 @@ export function ConversationMessageContent({ message, refresh, bodyDisplayMode, 
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState(false)
   const [overflowing, setOverflowing] = useState(false)
-  const [imagePreference, setImagePreference] = useState<'default' | 'allow' | 'block'>('default')
-  const [imageWarningOpen, setImageWarningOpen] = useState(false)
   const container = useRef<HTMLDivElement>(null)
   const content = useRef<HTMLDivElement>(null)
   const marking = useRef(false)
@@ -50,21 +48,13 @@ export function ConversationMessageContent({ message, refresh, bodyDisplayMode, 
     const links: ConversationTextLink[] = []
     return { body: (html ? conversationHtmlToText(html, links) : '') || plainText || '', links }
   }, [plainText, html])
+  const copyBody = useMemo(() => plainText?.trim() ? plainText : (html ? conversationHtmlToText(html) : null), [plainText, html])
   const hasBody = loadedBody !== null || Boolean(body || html)
   const showBodySkeleton = !hasBody && Boolean(message.messageId) && !error
-  const showHtml = bodyDisplayMode === 'html' || imagePreference === 'allow'
-  const allowImages = showHtml && (imagePreference === 'allow' || (imagePreference === 'default' && !externalImagesBlocked))
-  const blockedPrepared = useMemo(() => html
+  const showHtml = bodyDisplayMode === 'html'
+  const prepared = useMemo(() => html && showHtml
     ? prepareMailHtml(html, { allowExternalImages: false })
-    : null, [html])
-  const prepared = useMemo(() => html && allowImages
-    ? prepareMailHtml(html, { allowExternalImages: true })
-    : blockedPrepared, [html, allowImages, blockedPrepared])
-  const hasExternalImages = (blockedPrepared?.blockedImageResourceCount ?? 0) > 0
-
-  useEffect(() => {
-    setImagePreference('default')
-  }, [externalImagesBlocked])
+    : null, [html, showHtml])
 
   useEffect(() => {
     const element = content.current
@@ -81,8 +71,13 @@ export function ConversationMessageContent({ message, refresh, bodyDisplayMode, 
     const observer = new IntersectionObserver((entries) => {
       if (!entries.some((entry) => entry.isIntersecting) || marking.current) return
       marking.current = true
-      void window.api.messages.setReadState(message.messageId!, true).then(refresh).catch(() => { marking.current = false })
-      observer.disconnect()
+      void window.api.messages.setReadState(message.messageId!, true)
+        .then((update) => {
+          observer.disconnect()
+          refresh()
+          if (update.remoteSynced === false) toast.warning(text('仅在本机标为已读；此 API 账号暂不支持写回远端', 'Marked read only on this device; this API account cannot update the server yet'))
+        })
+        .catch((reason) => { marking.current = false; toast.error(String(reason)) })
     }, { threshold: 0.1 })
     observer.observe(container.current)
     return () => observer.disconnect()
@@ -124,29 +119,35 @@ export function ConversationMessageContent({ message, refresh, bodyDisplayMode, 
     } catch { toast.error(text('无法打开链接，请稍后重试', 'Could not open the link. Try again.')) }
   }
 
-  return <div ref={container} className="min-w-0" aria-busy={loading}>
-    <div id={contentId} className="overflow-hidden" style={{ maxHeight: expanded ? undefined : COLLAPSED_HEIGHT, maskImage: overflowing && !expanded ? 'linear-gradient(to bottom, black calc(100% - 24px), transparent)' : undefined }}>
-      <div ref={content} className="flow-root" onClick={openLink} onAuxClick={openLink}>
-        {showBodySkeleton ? <div role="status" aria-label={text('加载邮件中', 'Loading message')} className="space-y-2 py-1">
-          <Skeleton className="h-4 w-11/12" />
-          <Skeleton className="h-4 w-full" />
-          <Skeleton className="h-4 w-4/5" />
-          <Skeleton className="mt-4 h-4 w-2/3" />
-        </div> : showHtml && prepared ? <div className="mail-html conversation-html text-sm" dangerouslySetInnerHTML={{ __html: prepared.html }} /> : <MessageText value={body || message.snippet || text(hasBody ? '（无文本内容）' : '正文尚未加载', hasBody ? '(No text content)' : 'Message body has not been loaded')} links={links} quoteLabel={text('展开引用与签名', 'Show quoted text and signature')} />}
+  return <div ref={container} className="min-w-0 max-w-full" aria-busy={loading}>
+    <div className={cn('conversation-bubble relative max-w-full rounded px-3 py-2.5', showBodySkeleton ? 'w-80' : 'w-fit', message.direction === 'outgoing' && 'is-outgoing ml-auto')}>
+      <div id={contentId} className={expanded ? undefined : 'overflow-hidden'} style={{ maxHeight: expanded ? undefined : COLLAPSED_HEIGHT, maskImage: overflowing && !expanded ? 'linear-gradient(to bottom, black calc(100% - 24px), transparent)' : undefined }}>
+        <div ref={content} className="flow-root" onClick={openLink} onAuxClick={openLink}>
+          {showBodySkeleton ? <div role="status" aria-label={text('加载邮件中', 'Loading message')} className="space-y-2 py-1">
+            <Skeleton className="h-4 w-11/12" />
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-4 w-4/5" />
+            <Skeleton className="mt-4 h-4 w-2/3" />
+          </div> : showHtml && prepared ? <div className="mail-html conversation-html text-sm" dangerouslySetInnerHTML={{ __html: prepared.html }} /> : <MessageText value={body || message.snippet || text(hasBody ? '（无文本内容）' : '正文尚未加载', hasBody ? '(No text content)' : 'Message body has not been loaded')} links={links} quoteLabel={text('展开引用与签名', 'Show quoted text and signature')} />}
+        </div>
       </div>
+      {error && <p role="alert" className="mt-2 text-xs text-destructive">{error}</p>}
     </div>
-    {error && <p role="alert" className="mt-2 text-xs text-destructive">{error}</p>}
-    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
-    {overflowing && <Button variant="ghost" size="sm" className="h-6 px-1 text-xs" aria-expanded={expanded} aria-controls={contentId} onClick={() => setExpanded(!expanded)}>
-      {expanded ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}{text(expanded ? '收起正文' : '展开全文', expanded ? 'Collapse message' : 'Show full message')}
-    </Button>}
-    {hasExternalImages && (allowImages
-      ? <Button className="h-6 px-1 text-xs" size="sm" variant="ghost" onClick={() => setImagePreference('block')}><ImageOff className="size-3" />{text('隐藏图片', 'Hide images')}</Button>
-      : <Button className="h-6 px-1 text-xs" size="sm" variant="ghost" aria-haspopup="dialog" onClick={() => setImageWarningOpen(true)}><Image className="size-3" />{text('加载图片', 'Load images')}</Button>)}
-    {!hasBody && error && !loading && <Button className="h-6 px-1 text-xs" size="sm" variant="ghost" onClick={() => void load()}>{text('重试加载', 'Retry loading')}</Button>}
-    {children}
-    </div>
-    <ImageLoadWarningDialog open={imageWarningOpen} onOpenChange={setImageWarningOpen} onConfirm={() => setImagePreference('allow')} text={text} />
+    <TooltipProvider>
+      <div className="conversation-message-actions mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+        {overflowing && <Tooltip>
+          <TooltipTrigger asChild><Button variant="outline" size="icon-sm" aria-label={text(expanded ? '收起正文' : '展开全文', expanded ? 'Collapse message' : 'Show full message')} aria-expanded={expanded} aria-controls={contentId} onClick={() => setExpanded(!expanded)}>
+            {expanded ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
+          </Button></TooltipTrigger>
+          <TooltipContent side="bottom">{text(expanded ? '收起正文' : '展开全文', expanded ? 'Collapse message' : 'Show full message')}</TooltipContent>
+        </Tooltip>}
+        {!hasBody && error && !loading && <Tooltip>
+          <TooltipTrigger asChild><Button size="icon-sm" variant="outline" aria-label={text('重试加载', 'Retry loading')} onClick={() => void load()}><RotateCw className="size-4" /></Button></TooltipTrigger>
+          <TooltipContent side="bottom">{text('重试加载', 'Retry loading')}</TooltipContent>
+        </Tooltip>}
+        {children(copyBody)}
+      </div>
+    </TooltipProvider>
   </div>
 }
 

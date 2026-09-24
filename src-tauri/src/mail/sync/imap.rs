@@ -259,10 +259,7 @@ async fn sync_imap_folder(
         let transaction = connection.unchecked_transaction()
             .map_err(|error| format!("开始保存邮件标记失败：{error}"))?;
         for (uid, is_read) in flags {
-            transaction.execute(
-                "UPDATE onemail_mail_messages SET is_read=?2,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE folder_id=?1 AND uid=?3",
-                params![folder.folder_id, is_read, i64::from(uid)],
-            ).map_err(|error| format!("保存邮件标记失败：{error}"))?;
+            update_cached_read_flag(&transaction, folder.folder_id, uid, is_read)?;
         }
         transaction.commit().map_err(|error| format!("提交邮件标记失败：{error}"))?;
         fetched_count += batch.len() as u64;
@@ -374,6 +371,17 @@ async fn sync_imap_folder(
         "uidValidityReset": uid_validity_reset,
         "ok": true
     }))
+}
+
+pub(super) fn update_cached_read_flag(connection: &Connection, folder_id: i64, uid: u32, is_read: bool) -> Result<(), String> {
+    connection.execute(
+        "UPDATE onemail_mail_messages SET
+           is_read=COALESCE(read_state_override,?2),
+           read_state_override=CASE WHEN read_state_override=?2 THEN NULL ELSE read_state_override END,
+           updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE folder_id=?1 AND uid=?3",
+        params![folder_id, is_read, i64::from(uid)],
+    ).map_err(|error| format!("保存邮件标记失败：{error}"))?;
+    Ok(())
 }
 
 fn select_uids_to_fetch(remote_uids: &[u32], last_uid: Option<i64>, reconcile: bool) -> Vec<u32> {

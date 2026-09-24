@@ -1,8 +1,11 @@
 import type * as React from 'react'
-import type { UseFormReturn } from 'react-hook-form'
+import { Controller, type UseFormReturn } from 'react-hook-form'
 
+import { FieldLabel, FieldLegend, FieldSet } from '@renderer/components/ui/field'
 import { Input } from '@renderer/components/ui/input'
+import { RadioGroup, RadioGroupItem } from '@renderer/components/ui/radio-group'
 import { useI18n } from '@renderer/lib/i18n'
+import { cn } from '@renderer/lib/utils'
 import type { AccountFormValues } from './account-form-types'
 import { AccountFormField } from './account-form-field'
 
@@ -12,8 +15,7 @@ type GmailAccountFormProps = {
 
 export function GmailAccountForm({ form }: GmailAccountFormProps): React.JSX.Element {
   const { t } = useI18n()
-  const authType = form.watch('authType')
-  const usesOAuth = authType === 'oauth2'
+  const usesOAuth = form.watch('authType') === 'oauth2'
 
   return (
     <>
@@ -30,36 +32,52 @@ export function GmailAccountForm({ form }: GmailAccountFormProps): React.JSX.Ele
           placeholder="name@gmail.com"
           required={!usesOAuth}
           aria-invalid={Boolean(form.formState.errors.email)}
+          aria-describedby={form.formState.errors.email ? 'account-email-error' : undefined}
           {...form.register('email')}
         />
       </AccountFormField>
 
-      <div className="flex flex-col gap-1.5 rounded-md border bg-muted/20 p-2 text-xs">
-        <label className="flex items-center gap-2">
-          <input
-            type="radio"
-            name="gmail-auth-type"
-            checked={usesOAuth}
-            onChange={() => form.setValue('authType', 'oauth2', { shouldValidate: true })}
-          />
-          <span>{t('account.form.googleLogin')}</span>
-        </label>
-      </div>
-
-      <details open={!usesOAuth} className="rounded-md border px-2 py-1.5">
-        <summary className="cursor-pointer text-xs font-medium">
-          {t('account.form.advancedOptions')}
-        </summary>
-        <label className="mt-2 flex items-center gap-2 text-xs">
-          <input
-            type="radio"
-            name="gmail-auth-type"
-            checked={authType === 'app_password'}
-            onChange={() => form.setValue('authType', 'app_password', { shouldValidate: true })}
-          />
-          <span>{t('account.form.gmailAppPassword')}</span>
-        </label>
-      </details>
+      <FieldSet className="gap-2">
+        <FieldLegend id="gmail-auth-legend" variant="label" className="mb-0">
+          {t('account.form.authMethod')}
+        </FieldLegend>
+        <Controller
+          control={form.control}
+          name="authType"
+          render={({ field }) => (
+            <RadioGroup
+              value={field.value}
+              onValueChange={(value) => {
+                field.onChange(value)
+                form.clearErrors(['email', 'password'])
+              }}
+              aria-labelledby="gmail-auth-legend"
+              className="gap-2"
+            >
+              <FieldLabel
+                htmlFor="gmail-oauth"
+                className={cn(
+                  'flex w-full cursor-pointer items-center gap-2.5 rounded-lg border bg-background px-3 py-2.5 text-sm font-medium hover:bg-muted/40',
+                  usesOAuth && 'border-primary/50 bg-primary/5'
+                )}
+              >
+                <RadioGroupItem id="gmail-oauth" value="oauth2" />
+                {t('account.form.googleLogin')}
+              </FieldLabel>
+              <FieldLabel
+                htmlFor="gmail-app-password"
+                className={cn(
+                  'flex w-full cursor-pointer items-center gap-2.5 rounded-lg border bg-background px-3 py-2.5 text-sm font-medium hover:bg-muted/40',
+                  !usesOAuth && 'border-primary/50 bg-primary/5'
+                )}
+              >
+                <RadioGroupItem id="gmail-app-password" value="app_password" />
+                {t('account.form.gmailAppPassword')}
+              </FieldLabel>
+            </RadioGroup>
+          )}
+        />
+      </FieldSet>
 
       {usesOAuth ? (
         <p className="text-xs leading-5 text-muted-foreground">
@@ -79,6 +97,7 @@ export function GmailAccountForm({ form }: GmailAccountFormProps): React.JSX.Ele
             placeholder={t('account.form.gmailPasswordPlaceholder')}
             required
             aria-invalid={Boolean(form.formState.errors.password)}
+            aria-describedby={form.formState.errors.password ? 'account-password-error' : undefined}
             {...form.register('password')}
           />
         </AccountFormField>
@@ -94,6 +113,7 @@ export function GmailAccountForm({ form }: GmailAccountFormProps): React.JSX.Ele
           autoComplete="off"
           placeholder={t('account.form.labelPlaceholder')}
           aria-invalid={Boolean(form.formState.errors.accountLabel)}
+          aria-describedby={form.formState.errors.accountLabel ? 'account-label-error' : undefined}
           {...form.register('accountLabel')}
         />
       </AccountFormField>

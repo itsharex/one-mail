@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { queryClient } from '@renderer/lib/query-client'
 import { type BackupImportDialogSource } from '@renderer/components/backup/backup-import-dialog'
@@ -49,6 +50,7 @@ export function useMailboxWorkspaceData() {
   const { syncingAccountIds, syncNotice, startSyncing, finishSyncing, setNotice, clearSyncing } =
     useSyncFeedback()
   const [loading, setLoading] = React.useState(true)
+  const [loadingPhase, setLoadingPhase] = React.useState<'initializing' | 'database' | 'accounts'>('initializing')
   const [error, setError] = React.useState<string | null>(null)
   const conversationLayout = ResizablePrimitive.useDefaultLayout({
     id: 'onemail-conversation-layout-v1',
@@ -138,7 +140,7 @@ export function useMailboxWorkspaceData() {
         setLoading(true)
         setError(null)
         const [data, nextAiSettings] = await Promise.all([
-          loadInitialData(),
+          loadInitialData((phase) => { if (!cancelled) setLoadingPhase(phase) }),
           loadAiSettings().catch(() => null)
         ])
         if (cancelled) return
@@ -198,7 +200,8 @@ export function useMailboxWorkspaceData() {
       steps: progress.stage || progress.completed !== undefined ? [...(current.steps ?? []).slice(-19), {
         account: accounts.find((account) => account.accountId === progress.accountId)?.address ?? String(progress.accountId),
         stage: progress.stage ?? (progress.skipped ? 'skipped' : progress.ok ? 'complete' : 'failed'),
-        folder: progress.folder
+        folder: progress.folder,
+        at: Date.now()
       }] : current.steps,
       message: progress.completed !== undefined && progress.total !== undefined
         ? t('mailbox.syncProgress', { completed: progress.completed, total: progress.total })
@@ -210,6 +213,24 @@ export function useMailboxWorkspaceData() {
     setSelectedAccountId('all')
     setOpenMessageId(messageId)
   }), [])
+
+  React.useEffect(() => {
+    let active = true
+    let stop: (() => void) | undefined
+    const openPendingCompose = () => {
+      if (loading) return
+      void invoke<boolean>('tray_take_compose_request')
+        .then((pending) => { if (active && pending && !composerOpen) void openComposer('new') })
+        .catch((reason) => console.warn('Failed to read tray compose action.', reason))
+    }
+    void listen('tray/compose', openPendingCompose)
+      .then((unlisten) => {
+        if (active) { stop = unlisten; openPendingCompose() }
+        else unlisten()
+      })
+      .catch((reason) => console.warn('Failed to listen for tray compose action.', reason))
+    return () => { active = false; stop?.() }
+  }, [composerOpen, loading, openComposer])
 
   React.useEffect(() => {
     let cancelled = false
@@ -359,6 +380,7 @@ export function useMailboxWorkspaceData() {
     handleRefreshOutbox,
     hasAccounts,
     loading,
+    loadingPhase,
     openComposer,
     openMessageId,
     openOutboxDraft,

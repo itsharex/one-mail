@@ -1,15 +1,19 @@
 mod detail;
 
 pub(crate) use detail::get_message_detail;
-use detail::{map_message_summary, message_has_cached_body_but_missing_headers};
+use detail::message_has_cached_body_but_missing_headers;
 
-use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
+use rusqlite::{params, OptionalExtension};
+use async_imap::types::Flag;
 use serde_json::{json, Value};
-use tauri::State;
+use std::time::Duration;
+use futures_util::TryStreamExt;
+use tauri::{AppHandle, Emitter, State};
+use tokio::time::timeout;
 
-use crate::{db, mail::body as mail_body, state::AppState};
+use crate::{db, mail::{body as mail_body, transport as mail_transport}, state::AppState};
 
-use super::utils::{database_error, optional_i64, optional_string, require_object, required_i64};
+use super::utils::database_error;
 
 #[tauri::command]
 pub fn messages_stats(state: State<'_, AppState>) -> Result<Value, String> {
@@ -33,94 +37,6 @@ pub fn messages_stats(state: State<'_, AppState>) -> Result<Value, String> {
                 "latestMessageAt": row.get::<_, Option<i64>>(3)?
             }))
         })
-        .map_err(database_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(database_error)?;
-    Ok(Value::Array(rows))
-}
-
-#[tauri::command]
-pub fn messages_list(state: State<'_, AppState>, query: Option<Value>) -> Result<Value, String> {
-    let connection = db::open(&state)?;
-    let query_object = query.as_ref().and_then(Value::as_object);
-    let mut where_parts = vec!["m.remote_deleted=0", "m.user_hidden=0"];
-    let mut values: Vec<SqlValue> = Vec::new();
-
-    if let Some(account_id) = query_object.and_then(|object| optional_i64(object, "accountId")) {
-        where_parts.push("m.account_id=?");
-        values.push(account_id.into());
-    }
-    if let Some(folder_id) = query_object.and_then(|object| optional_i64(object, "folderId")) {
-        where_parts.push("m.folder_id=?");
-        values.push(folder_id.into());
-    }
-    let filters = query_object
-        .and_then(|object| object.get("filters"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    if filters.iter().any(|value| value == "unread") {
-        where_parts.push("m.is_read=0");
-    }
-    if filters.iter().any(|value| value == "starred") {
-        where_parts.push("m.is_starred=1");
-    }
-    if filters.iter().any(|value| value == "today") {
-        where_parts.push(
-            "date(COALESCE(m.received_at,m.internal_date),'localtime')=date('now','localtime')",
-        );
-    }
-    if filters.iter().any(|value| value == "yesterday") {
-        where_parts.push(
-            "date(COALESCE(m.received_at,m.internal_date),'localtime')=date('now','localtime','-1 day')",
-        );
-    }
-    if filters.iter().any(|value| value == "last7") {
-        where_parts.push(
-            "date(COALESCE(m.received_at,m.internal_date),'localtime')>=date('now','localtime','-6 days')",
-        );
-    }
-    let keyword = query_object
-        .and_then(|object| {
-            optional_string(object, "keyword").or_else(|| optional_string(object, "search"))
-        })
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    if let Some(keyword) = keyword {
-        where_parts.push(
-            "(m.subject LIKE ? OR m.from_name LIKE ? OR m.from_email LIKE ? OR m.snippet LIKE ? OR b.body_text LIKE ?)",
-        );
-        let like = format!("%{keyword}%");
-        for _ in 0..5 {
-            values.push(like.clone().into());
-        }
-    }
-    let limit = query_object
-        .and_then(|object| optional_i64(object, "limit"))
-        .unwrap_or(50)
-        .clamp(1, 200);
-    let offset = query_object
-        .and_then(|object| optional_i64(object, "offset"))
-        .unwrap_or(0)
-        .max(0);
-    values.push(limit.into());
-    values.push(offset.into());
-
-    let sql = format!(
-        "SELECT m.message_id,m.account_id,m.folder_id,f.role,f.name,
-                m.rfc822_message_id,m.references_header,m.subject,m.from_name,m.from_email,
-                m.received_at,m.snippet,m.is_read,m.is_starred,m.has_attachments,m.body_status,m.body_error
-         FROM onemail_mail_messages m
-         JOIN onemail_mail_folders f ON f.folder_id=m.folder_id
-         LEFT JOIN onemail_message_bodies b ON b.message_id=m.message_id
-         WHERE {}
-         ORDER BY COALESCE(m.received_at,m.internal_date,m.created_at) DESC,m.message_id DESC
-         LIMIT ? OFFSET ?",
-        where_parts.join(" AND ")
-    );
-    let mut statement = connection.prepare(&sql).map_err(database_error)?;
-    let rows = statement
-        .query_map(params_from_iter(values.iter()), map_message_summary)
         .map_err(database_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(database_error)?;
@@ -193,216 +109,115 @@ pub async fn messages_load_body(
 }
 
 #[tauri::command]
-pub fn messages_set_read_state(
+pub async fn messages_set_read_state(
+    app: AppHandle,
     state: State<'_, AppState>,
     message_id: i64,
     is_read: bool,
 ) -> Result<Value, String> {
-    let connection = db::open(&state)?;
-    set_read_state(&connection, message_id, is_read)
+    let update = set_read_state(&state, message_id, is_read).await?;
+    emit_read_state_change(&app, &update);
+    Ok(update)
 }
 
-#[tauri::command]
-pub fn messages_bulk_set_read_state(
-    state: State<'_, AppState>,
-    input: Value,
-) -> Result<Value, String> {
-    let object = require_object(&input)?;
-    let is_read = object
-        .get("isRead")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let message_ids = object
-        .get("messageIds")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let connection = db::open(&state)?;
-    let mut updates = Vec::new();
-    let mut succeeded = Vec::new();
-    let mut failed = Vec::new();
-    for value in message_ids {
-        let Some(message_id) = value.as_i64() else {
-            continue;
-        };
-        match set_read_state(&connection, message_id, is_read) {
-            Ok(update) => {
-                updates.push(update);
-                succeeded.push(message_id);
-            }
-            Err(error) => failed.push(json!({ "messageId": message_id, "error": error })),
-        }
-    }
-    Ok(json!({
-        "isRead": is_read,
-        "updates": updates,
-        "succeededMessageIds": succeeded,
-        "failedItems": failed,
-        "updatedCount": succeeded.len(),
-        "failedCount": failed.len()
-    }))
-}
-
-#[tauri::command]
-pub fn messages_mark_all_read(
-    state: State<'_, AppState>,
-    input: Option<Value>,
-) -> Result<Value, String> {
-    let query = input
-        .and_then(|value| value.get("query").cloned())
-        .unwrap_or_else(|| json!({ "filters": ["unread"], "limit": 200 }));
-    let listed = messages_list(state.clone(), Some(query))?;
-    let ids = listed
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|message| message.get("messageId").and_then(Value::as_i64))
-        .map(Value::from)
-        .collect::<Vec<_>>();
-    messages_bulk_set_read_state(state, json!({ "messageIds": ids, "isRead": true }))
-}
-
-#[tauri::command]
-pub fn messages_hide_local(state: State<'_, AppState>, message_id: i64) -> Result<Value, String> {
-    let connection = db::open(&state)?;
-    let account_id = message_account_id(&connection, message_id)?;
-    connection
-        .execute(
-            "UPDATE onemail_mail_messages SET user_hidden=1,
-              updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE message_id=?1",
-            [message_id],
-        )
-        .map_err(database_error)?;
-    Ok(json!({
-        "messageId": message_id,
-        "accountId": account_id,
-        "mode": "local_hide",
-        "deleted": true,
-        "localOnly": true
-    }))
-}
-
-#[tauri::command]
-pub fn messages_delete(state: State<'_, AppState>, input: Value) -> Result<Value, String> {
-    let object = require_object(&input)?;
-    let message_id = required_i64(object, "messageId", "邮件 ID 无效。")?;
-    let mode = optional_string(object, "mode").unwrap_or_else(|| "permanent".to_string());
-    if mode == "local_hide" {
-        return messages_hide_local(state, message_id);
-    }
-    let connection = db::open(&state)?;
-    let account_id = message_account_id(&connection, message_id)?;
-    connection
-        .execute(
-            "UPDATE onemail_mail_messages SET user_deleted=1,user_hidden=1,
-              deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-              updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE message_id=?1",
-            [message_id],
-        )
-        .map_err(database_error)?;
-    Ok(json!({
-        "messageId": message_id,
-        "accountId": account_id,
-        "mode": "permanent",
-        "deleted": true,
-        "localOnly": true
-    }))
-}
-
-#[tauri::command]
-pub fn messages_bulk_delete(state: State<'_, AppState>, input: Value) -> Result<Value, String> {
-    let object = require_object(&input)?;
-    let mode = optional_string(object, "mode").unwrap_or_else(|| "permanent".to_string());
-    let ids = object
-        .get("messageIds")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut succeeded = Vec::new();
-    let mut failed = Vec::new();
-    for id in ids {
-        let Some(message_id) = id.as_i64() else {
-            continue;
-        };
-        match messages_delete(
-            state.clone(),
-            json!({ "messageId": message_id, "mode": mode }),
-        ) {
-            Ok(_) => succeeded.push(message_id),
-            Err(error) => failed.push(json!({ "messageId": message_id, "error": error })),
-        }
-    }
-    Ok(json!({
-        "mode": mode,
-        "succeededMessageIds": succeeded,
-        "failedItems": failed,
-        "deletedCount": succeeded.len(),
-        "failedCount": failed.len()
-    }))
-}
-
-#[tauri::command]
-pub fn messages_restore(state: State<'_, AppState>, message_id: i64) -> Result<Value, String> {
-    let connection = db::open(&state)?;
-    let account_id = message_account_id(&connection, message_id)?;
-    connection
-        .execute(
-            "UPDATE onemail_mail_messages SET user_deleted=0,user_hidden=0,deleted_at=NULL,
-              updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE message_id=?1",
-            [message_id],
-        )
-        .map_err(database_error)?;
-    Ok(json!({
-        "messageId": message_id,
-        "accountId": account_id,
-        "restored": true,
-        "localOnly": true
-    }))
-}
-
-#[tauri::command]
-pub fn messages_download_attachment(attachment_id: i64) -> Result<Value, String> {
-    let _ = attachment_id;
-    Err("Tauri 附件远端下载仍在迁移中；已导入的附件元数据可以正常查看。".to_string())
-}
-
-fn set_read_state(
-    connection: &Connection,
+async fn set_read_state(
+    state: &AppState,
     message_id: i64,
     is_read: bool,
 ) -> Result<Value, String> {
+    let connection = db::open(state)?;
     let target = connection
         .query_row(
-            "SELECT account_id,folder_id FROM onemail_mail_messages WHERE message_id=?1",
+            "SELECT m.account_id,m.folder_id,f.path,m.uid,f.uid_validity,s.highest_modseq
+             FROM onemail_mail_messages m
+             JOIN onemail_mail_folders f ON f.folder_id=m.folder_id
+             LEFT JOIN onemail_folder_sync_states s ON s.folder_id=m.folder_id
+             WHERE m.message_id=?1 AND m.remote_deleted=0",
             [message_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?)),
         )
         .optional()
         .map_err(database_error)?
         .ok_or_else(|| "邮件不存在。".to_string())?;
-    connection
-        .execute(
-            "UPDATE onemail_mail_messages SET is_read=?2,
-              updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE message_id=?1",
-            params![message_id, is_read],
-        )
-        .map_err(database_error)?;
+    drop(connection);
+    if target.5.as_deref().is_some_and(|cursor| cursor.starts_with("gmail-history:") || cursor.starts_with("graph-delta:")) {
+        persist_read_state(state, message_id, target.0, target.1, is_read, false)?;
+        return Ok(json!({
+            "messageId": message_id, "accountId": target.0, "folderId": target.1,
+            "isRead": is_read, "remoteSynced": false
+        }));
+    }
+    let uid = u32::try_from(target.3).map_err(|_| "邮件 UID 无效，无法更新已读状态。".to_string())?;
+    let account = mail_transport::load_account(state, target.0)?;
+    let mut session = timeout(Duration::from_secs(30), mail_transport::connect_authenticated(state, &account))
+        .await.map_err(|_| "连接 IMAP 服务器超时，已读状态未更改。".to_string())??;
+    let mailbox = timeout(Duration::from_secs(30), session.select(&target.2))
+        .await.map_err(|_| "打开邮件文件夹超时，已读状态未更改。".to_string())?
+        .map_err(|error| format!("打开邮件文件夹失败，已读状态未更改：{error}"))?;
+    if target.4.as_deref().is_some_and(|expected| mailbox.uid_validity.map(|actual| actual.to_string()).as_deref() != Some(expected)) {
+        return Err("邮件文件夹 UID 已变化，请先刷新邮箱再重试。".to_string());
+    }
+    let flag = if is_read { "+FLAGS.SILENT (\\Seen)" } else { "-FLAGS.SILENT (\\Seen)" };
+    let mut responses = timeout(Duration::from_secs(30), session.uid_store(uid.to_string(), flag))
+        .await.map_err(|_| "更新远端已读状态超时。".to_string())?
+        .map_err(|error| format!("更新远端已读状态失败：{error}"))?;
+    while timeout(Duration::from_secs(30), responses.try_next())
+        .await.map_err(|_| "等待远端已读状态确认超时。".to_string())?
+        .map_err(|error| format!("远端已读状态未确认：{error}"))?.is_some() {}
+    drop(responses);
+    let mut fetched = timeout(Duration::from_secs(30), session.uid_fetch(uid.to_string(), "(UID FLAGS)"))
+        .await.map_err(|_| "验证远端已读状态超时。".to_string())?
+        .map_err(|error| format!("验证远端已读状态失败：{error}"))?;
+    let mut confirmed = false;
+    while let Some(message) = timeout(Duration::from_secs(30), fetched.try_next())
+        .await.map_err(|_| "等待远端已读状态验证超时。".to_string())?
+        .map_err(|error| format!("读取远端已读状态失败：{error}"))? {
+        if message.uid == Some(uid) {
+            confirmed = message.flags().any(|flag| matches!(flag, Flag::Seen)) == is_read;
+        }
+    }
+    drop(fetched);
+    if !confirmed {
+        return Err("服务器未确认已读状态，请刷新邮箱后重试。".to_string());
+    }
+    let _ = timeout(Duration::from_secs(10), session.logout()).await;
+    persist_read_state(state, message_id, target.0, target.1, is_read, true)?;
     Ok(json!({
         "messageId": message_id,
         "accountId": target.0,
         "folderId": target.1,
-        "isRead": is_read
+        "isRead": is_read,
+        "remoteSynced": true
     }))
 }
 
-fn message_account_id(connection: &Connection, message_id: i64) -> Result<i64, String> {
-    connection
-        .query_row(
-            "SELECT account_id FROM onemail_mail_messages WHERE message_id=?1",
-            [message_id],
-            |row| row.get(0),
+fn persist_read_state(state: &AppState, message_id: i64, account_id: i64, folder_id: i64, is_read: bool, remote_synced: bool) -> Result<(), String> {
+    let mut connection = db::open(state)?;
+    let protect_from_in_flight_sync = !remote_synced || state.sync_tracker.account_ids()?.contains(&account_id);
+    let transaction = connection.transaction().map_err(database_error)?;
+    transaction
+        .execute(
+            "UPDATE onemail_mail_messages SET is_read=?2,read_state_override=CASE WHEN ?3 THEN ?2 ELSE NULL END,
+              updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE message_id=?1",
+            params![message_id, is_read, protect_from_in_flight_sync],
         )
-        .map_err(|_| "邮件不存在。".to_string())
+        .map_err(database_error)?;
+    transaction.execute(
+        "UPDATE onemail_mail_folders SET unread_count=(SELECT COUNT(*) FROM onemail_mail_messages
+         WHERE folder_id=?1 AND is_read=0 AND remote_deleted=0 AND user_hidden=0) WHERE folder_id=?1",
+        [folder_id],
+    ).map_err(database_error)?;
+    transaction.commit().map_err(database_error)?;
+    Ok(())
+}
+
+fn emit_read_state_change(app: &AppHandle, update: &Value) {
+    let _ = app.emit("sync/mailboxChanged", json!({
+        "accountId": update["accountId"],
+        "reason": "read-state",
+        "changedAt": db::now_iso()
+    }));
 }
 
 #[cfg(test)]

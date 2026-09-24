@@ -31,6 +31,7 @@ export function OutlookAccountForm({ form }: OutlookAccountFormProps): React.JSX
           autoComplete="off"
           placeholder={t('account.form.labelPlaceholder')}
           aria-invalid={Boolean(form.formState.errors.accountLabel)}
+          aria-describedby={form.formState.errors.accountLabel ? 'account-label-error' : undefined}
           {...form.register('accountLabel')}
         />
       </AccountFormField>
